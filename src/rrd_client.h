@@ -27,6 +27,7 @@
 #ifndef __RRD_CLIENT_H
 #define __RRD_CLIENT_H 1
 
+
 #ifndef WIN32
 # ifdef HAVE_STDINT_H
 #  include <stdint.h>
@@ -56,6 +57,15 @@
 
 #define RRDCACHED_DEFAULT_PORT "3033" //"42217"
 #define ENV_RRDCACHED_ADDRESS "RRDCACHED_ADDRESS"
+#include <ev.h>
+struct rrdc_response_s
+{
+  int status;
+  char *message;
+  char **lines;
+  size_t lines_num;
+};
+typedef struct rrdc_response_s rrdc_response_t;
 
 
 // Windows version has no daemon/client support
@@ -64,6 +74,7 @@
 int rrdc_connect (const char *addr);
 int rrdc_is_connected(const char *daemon_addr);
 int rrdc_disconnect (void);
+//int rrdc_parallel_connect_network (const char *addr_orig);
 
 int rrdc_update (const char *filename, int values_num,
         const char * const *values);
@@ -79,8 +90,18 @@ int rrdc_fetch (const char *filename,
     char ***ret_ds_names,
     rrd_value_t **ret_data);
 
-int set_conn_to( 
-    int c_timeout);
+int rrdc_command (const char *filename, 
+    const char *cf, 
+    time_t *ret_start, time_t *ret_end, 
+    char *command_buffer, 
+    size_t *buffer_size_);
+
+int populate_gdes(rrdc_response_t *res, 
+    time_t *ret_start, time_t *ret_end,
+    unsigned long *ret_step,
+    unsigned long *ret_ds_num,
+    char ***ret_ds_names,
+    rrd_value_t **ret_data);
 
 #else
 #   define rrdc_flush_if_daemon(a,b) 0
@@ -89,6 +110,40 @@ int set_conn_to(
 #   define rrdc_flush(a) 0
 #   define rrdc_update(a,b,c) 0
 #endif
+int set_conn_to( 
+    int c_timeout);
+int set_parallel_fetch( 
+    int p_fetch);
+FILE* set_stream( 
+    FILE* stream_desc);
+int rrdc_parallel_connect_network (
+    const char *addr_orig);
+int request (
+    const char *buffer, 
+    size_t buffer_size, 
+    rrdc_response_t **ret_response);
+int response_read (
+    rrdc_response_t **ret_response);
+int parse_value_array_header (
+    char *line, time_t *ret_time, 
+    rrd_value_t *array, 
+    size_t array_len);
+int parse_char_array_header (
+    char *line, char **ret_key, 
+    char **array, size_t array_len, 
+    int alloc);
+int parse_ulong_header (
+    char *line, char **ret_key, 
+    unsigned long *ret_value);
+void response_free (
+    rrdc_response_t *res);
+int buffer_add_string (
+    const char *str, 
+    char **buffer_ret, 
+    size_t *buffer_size_ret);
+const char *get_path (
+    const char *path, 
+    char *resolved_path);
 
 struct rrdc_stats_s
 {

@@ -47,20 +47,12 @@
 #define ENODATA ENOENT
 #endif
 
-struct rrdc_response_s
-{
-  int status;
-  char *message;
-  char **lines;
-  size_t lines_num;
-};
-typedef struct rrdc_response_s rrdc_response_t;
-
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static int sd = -1;
 static FILE *sh = NULL;
 static char *sd_path = NULL; /* cache the path for sd */
 static int conn_timeout; /* User specified timeout */
+static int parallel_fetch; /* bool. Indicates if user specified parallel fetch */
 
 /* get_path: Return a path name appropriate to be sent to the daemon.
  *
@@ -70,11 +62,10 @@ static int conn_timeout; /* User specified timeout */
  * are not allowed, since path name translation is done by the server.
  *
  * One must hold `lock' when calling this function. */
-static const char *get_path (const char *path, char *resolved_path) /* {{{ */
+const char *get_path (const char *path, char *resolved_path) /* {{{ */
 {
   const char *ret = path;
   int is_unix = 0;
-
   if ((*sd_path == '/')
       || (strncmp ("unix:", sd_path, strlen ("unix:")) == 0))
     is_unix = 1;
@@ -145,7 +136,7 @@ static int parse_header (char *line, /* {{{ */
   return (0);
 } /* }}} int parse_header */
 
-static int parse_ulong_header (char *line, /* {{{ */
+int parse_ulong_header (char *line, /* {{{ */
     char **ret_key, unsigned long *ret_value)
 {
   char *str_value;
@@ -166,7 +157,7 @@ static int parse_ulong_header (char *line, /* {{{ */
   return (0);
 } /* }}} int parse_ulong_header */
 
-static int parse_char_array_header (char *line, /* {{{ */
+int parse_char_array_header (char *line, /* {{{ */
     char **ret_key, char **array, size_t array_len, int alloc)
 {
   char *tmp_array[array_len];
@@ -198,7 +189,7 @@ static int parse_char_array_header (char *line, /* {{{ */
   return (0);
 } /* }}} int parse_char_array_header */
 
-static int parse_value_array_header (char *line, /* {{{ */
+int parse_value_array_header (char *line, /* {{{ */
     time_t *ret_time, rrd_value_t *array, size_t array_len)
 {
   char *str_key;
@@ -250,7 +241,7 @@ static void close_connection (void) /* {{{ */
   sd_path = NULL;
 } /* }}} void close_connection */
 
-static int buffer_add_string (const char *str, /* {{{ */
+int buffer_add_string (const char *str, /* {{{ */
     char **buffer_ret, size_t *buffer_size_ret)
 {
   char *buffer;
@@ -338,7 +329,7 @@ static int chomp (char *str) /* {{{ */
   return (removed);
 } /* }}} int chomp */
 
-static void response_free (rrdc_response_t *res) /* {{{ */
+void response_free (rrdc_response_t *res) /* {{{ */
 {
   if (res == NULL)
     return;
@@ -356,7 +347,7 @@ static void response_free (rrdc_response_t *res) /* {{{ */
   free (res);
 } /* }}} void response_free */
 
-static int response_read (rrdc_response_t **ret_response) /* {{{ */
+int response_read (rrdc_response_t **ret_response) /* {{{ */
 {
   rrdc_response_t *ret;
 
@@ -364,7 +355,7 @@ static int response_read (rrdc_response_t **ret_response) /* {{{ */
   char *buffer_ptr;
 
   size_t i;
-
+ 
   if (sh == NULL)
     return (-1);
 
@@ -376,6 +367,7 @@ static int response_read (rrdc_response_t **ret_response) /* {{{ */
   ret->lines_num = 0;
 
   buffer_ptr = fgets (buffer, sizeof (buffer), sh);
+  // TODO remove.mariya puts(buffer);
   if (buffer_ptr == NULL) {
     close_connection();
     return (-3);
@@ -413,12 +405,16 @@ static int response_read (rrdc_response_t **ret_response) /* {{{ */
   for (i = 0; i < ret->lines_num; i++)
   {
     buffer_ptr = fgets (buffer, sizeof (buffer), sh);
+    // TODO remove.mariya puts(buffer);
+    /* 
     if (buffer_ptr == NULL)
     {
+      printf("Error? %d\n", ferror(sh));
+      perror("An error occurred");
       response_free (ret);
       close_connection();
       return (-6);
-    }
+    }*/
     chomp (buffer);
 
     ret->lines[i] = strdup (buffer);
@@ -434,7 +430,7 @@ static int response_read (rrdc_response_t **ret_response) /* {{{ */
   return (0);
 } /* }}} rrdc_response_t *response_read */
 
-static int request (const char *buffer, size_t buffer_size, /* {{{ */
+int request (const char *buffer, size_t buffer_size, /* {{{ */
     rrdc_response_t **ret_response)
 {
   int status;
@@ -470,6 +466,7 @@ static int request (const char *buffer, size_t buffer_size, /* {{{ */
 /* determine whether we are connected to the specified daemon_addr if
  * NULL, return whether we are connected at all
  */
+
 int rrdc_is_connected(const char *daemon_addr) /* {{{ */
 {
   if (sd < 0)
@@ -723,6 +720,124 @@ static int rrdc_connect_network (const char *addr_orig) /* {{{ */
   return (status);
 } /* }}} int rrdc_connect_network */
 
+int rrdc_parallel_connect_network (const char *addr_orig) /* {{{ */
+{
+  struct addrinfo ai_hints;
+  struct addrinfo *ai_res;
+  struct addrinfo *ai_ptr;
+  char addr_copy[NI_MAXHOST];
+  char *addr;
+  char *port;
+  // set socket descriptor non-blocking
+  long arg;
+ 
+  assert (addr_orig != NULL);
+  //assert (sd == -1);
+    
+  strncpy(addr_copy, addr_orig, sizeof(addr_copy));
+  addr_copy[sizeof(addr_copy) - 1] = '\0';
+  addr = addr_copy;
+
+  int status;
+  memset (&ai_hints, 0, sizeof (ai_hints));
+  ai_hints.ai_flags = 0;
+#ifdef AI_ADDRCONFIG
+  ai_hints.ai_flags |= AI_ADDRCONFIG;
+#endif
+  ai_hints.ai_family = AF_UNSPEC;
+  ai_hints.ai_socktype = SOCK_STREAM;
+
+  port = NULL;
+  if (*addr == '[') /* IPv6+port format */
+  {
+    /* `addr' is something like "[2001:780:104:2:211:24ff:feab:26f8]:12345" */
+    addr++;
+
+    port = strchr (addr, ']');
+    if (port == NULL)
+    {
+      rrd_set_error("malformed address: %s", addr_orig);
+      return (-1);
+    }
+    *port = 0;
+    port++;
+
+    if (*port == ':')
+      port++;
+    else if (*port == 0)
+      port = NULL;
+    else
+    {
+      rrd_set_error("garbage after address: %s", port);
+      return (-1);
+    }
+  } /* if (*addr == '[') */
+  else
+  {
+    port = rindex(addr, ':');
+    if (port != NULL)
+    {
+      *port = 0;
+      port++;
+    }
+  }
+
+  ai_res = NULL;
+  status = getaddrinfo (addr,
+                        port == NULL ? RRDCACHED_DEFAULT_PORT : port,
+                        &ai_hints, &ai_res);
+  if (status != 0)
+  {
+    rrd_set_error ("failed to resolve address `%s' (port %s): %s",
+        addr, port == NULL ? RRDCACHED_DEFAULT_PORT : port,
+        gai_strerror (status));
+    return (-1);
+  }
+
+  for (ai_ptr = ai_res; ai_ptr != NULL; ai_ptr = ai_ptr->ai_next)
+  {
+    sd = socket (ai_ptr->ai_family, ai_ptr->ai_socktype, ai_ptr->ai_protocol);
+    if (sd < 0)
+    {
+      status = errno;
+      sd = -1;
+      continue;
+    }
+
+    // Set non-blocking
+    if(((arg = fcntl(sd, F_GETFL, NULL))) < 0) {
+      rrd_set_error("Error fcntl(..., F_GETFL) (%s)\n", strerror(errno));
+      return -1;
+    }
+    arg |= O_NONBLOCK;
+    if( fcntl(sd, F_SETFL, arg) < 0) {
+      rrd_set_error("Error fcntl(..., F_SETFL) (%s)\n", strerror(errno));
+      return -1;
+    }
+
+
+    status = connect (sd, ai_ptr->ai_addr, ai_ptr->ai_addrlen);
+    /*
+    if (status != 0)
+    {
+      status = errno;
+      close_connection();
+      continue;
+    }*/
+    /*
+    sh = fdopen (sd, "r+");
+    if (sh == NULL)
+    {
+      status = errno;
+      close_connection ();
+      continue;
+    }*/
+    // assert (status == 0);
+    break;
+  } /* for (ai_ptr) */
+  return (sd);
+} /* }}} int rrdc_parallel_connect_network */
+
 int rrdc_connect (const char *addr) /* {{{ */
 {
   int status = 0;
@@ -734,16 +849,19 @@ int rrdc_connect (const char *addr) /* {{{ */
     return 0;
 
   pthread_mutex_lock(&lock);
-
-  if (sd >= 0 && sd_path != NULL && strcmp(addr, sd_path) == 0)
-  {
-    /* connection to the same daemon; use cached connection */
-    pthread_mutex_unlock (&lock);
-    return (0);
-  }
-  else
-  {
-    close_connection();
+  //TODO don't do this for parallel fetch!!!
+  if(!parallel_fetch)
+  { 
+    if (sd >= 0 && sd_path != NULL && strcmp(addr, sd_path) == 0)
+    {
+      /* connection to the same daemon; use cached connection */
+      pthread_mutex_unlock (&lock);
+      return (0);
+    }
+    else
+    {
+      close_connection();
+    }
   }
 
   rrd_clear_error ();
@@ -751,9 +869,12 @@ int rrdc_connect (const char *addr) /* {{{ */
     status = rrdc_connect_unix (addr + strlen ("unix:"));
   else if (addr[0] == '/')
     status = rrdc_connect_unix (addr);
+  else if (parallel_fetch){
+    status = rrdc_parallel_connect_network (addr);
+  }
   else
     status = rrdc_connect_network(addr);
-  if (status == 0 && sd >= 0)
+  if (/*sratus == 0 &&*/ sd >= 0)
   { 
     sd_path = strdup(addr);
   }
@@ -903,41 +1024,18 @@ int rrdc_flush (const char *filename) /* {{{ */
   return (status);
 } /* }}} int rrdc_flush */
 
-int rrdc_fetch (const char *filename, /* {{{ */
-    const char *cf,
-    time_t *ret_start, time_t *ret_end,
-    unsigned long *ret_step,
-    unsigned long *ret_ds_num,
-    char ***ret_ds_names,
-    rrd_value_t **ret_data)
+int rrdc_command(const char *filename, const char *cf, time_t *ret_start, time_t *ret_end, char *command_buffer, size_t *buffer_size_)
 {
   char buffer[4096];
+  //char *buffer;//??
   char *buffer_ptr;
   size_t buffer_free;
   size_t buffer_size;
-  rrdc_response_t *res;
+  int status;
   char path_buffer[PATH_MAX];
   const char *path_ptr;
 
-  char *str_tmp;
-  unsigned long flush_version;
-
-  time_t start;
-  time_t end;
-  unsigned long step;
-  unsigned long ds_num;
-  char **ds_names;
-
-  rrd_value_t *data;
-  size_t data_size;
-  size_t data_fill;
-
-  int status;
-  size_t current_line;
-  time_t t;
-
-  if ((filename == NULL) || (cf == NULL))
-    return (-1);
+  //buffer_size = *buffer_size_;
 
   /* Send request {{{ */
   memset (buffer, 0, sizeof (buffer));
@@ -952,7 +1050,6 @@ int rrdc_fetch (const char *filename, /* {{{ */
   path_ptr = get_path (filename, path_buffer);
   if (path_ptr == NULL)
     return (EINVAL);
-
   status = buffer_add_string (path_ptr, &buffer_ptr, &buffer_free);
   if (status != 0)
     return (ENOBUFS);
@@ -984,22 +1081,33 @@ int rrdc_fetch (const char *filename, /* {{{ */
   buffer_size = sizeof (buffer) - buffer_free;
   assert (buffer[buffer_size - 1] == ' ');
   buffer[buffer_size - 1] = '\n';
+  strcpy(command_buffer, buffer);
+  *buffer_size_ = buffer_size;
+  return 0;
+}
 
-  res = NULL;
-  status = request (buffer, buffer_size, &res);
-  if (status != 0)
-    return (status);
-    
+int populate_gdes(rrdc_response_t *res, 
+    time_t *ret_start, time_t *ret_end,
+    unsigned long *ret_step,
+    unsigned long *ret_ds_num,
+    char ***ret_ds_names,
+    rrd_value_t **ret_data)
+{
+  unsigned long ds_num;
+  char **ds_names;
+  rrd_value_t *data;
+  size_t current_line;
 
-  status = res->status;
-  if (status < 0)
-  {
-    rrd_set_error ("rrdcached: %s", res->message);
-    response_free (res);
-    return (status);
-  }
-  /* }}} Send request */
-
+  unsigned long flush_version;
+  time_t start;
+  time_t end;
+  unsigned long step;
+  char *str_tmp;
+  size_t data_size;
+  size_t data_fill;
+  time_t t;
+  int status;
+  
   ds_names = NULL;
   ds_num = 0;
   data = NULL;
@@ -1029,18 +1137,21 @@ int rrdc_fetch (const char *filename, /* {{{ */
     var = (type) value; \
     current_line++; \
   } while (0)
-
   if (res->lines_num < 1)
+  {
     BAIL_OUT (-1, "Premature end of response packet");
-
+  }
+  
   /* We're making some very strong assumptions about the fields below. We
    * therefore check the version of the `flush' command first, so that later
    * versions can change the order of fields and it's easier to implement
    * backwards compatibility. */
   READ_NUMERIC_FIELD ("FlushVersion", unsigned long, flush_version);
   if (flush_version != 1)
+  {
     BAIL_OUT (-1, "Don't know how to handle flush format version %lu.",
         flush_version);
+  }
 
   if (res->lines_num < 5)
     BAIL_OUT (-1, "Premature end of response packet");
@@ -1067,12 +1178,12 @@ int rrdc_fetch (const char *filename, /* {{{ */
 
   status = parse_char_array_header (res->lines[current_line],
       &str_tmp, ds_names, (size_t) ds_num, /* alloc = */ 1);
+
   if (status != 0)
     BAIL_OUT (-1, "Unable to parse header `DSName'");
   if (strcasecmp ("DSName", str_tmp) != 0)
     BAIL_OUT (-1, "Unexpected header line: Expected `DSName', got `%s'", str_tmp);
   current_line++;
-
   data_size = ds_num * (end - start) / step;
   if (data_size < 1)
     BAIL_OUT (-1, "No data returned or headers invalid.");
@@ -1100,7 +1211,6 @@ int rrdc_fetch (const char *filename, /* {{{ */
 
     data_fill += (size_t) ds_num;
   }
-
   *ret_start = start;
   *ret_end = end;
   *ret_step = step;
@@ -1112,15 +1222,85 @@ int rrdc_fetch (const char *filename, /* {{{ */
   return (0);
 #undef READ_NUMERIC_FIELD
 #undef BAIL_OUT
-} /* }}} int rrdc_flush */
+} /* }}} int populate_gdes() */
 
-int set_conn_to( 
+
+int rrdc_fetch (const char *filename, /* {{{ */
+    const char *cf,
+    time_t *ret_start, time_t *ret_end,
+    unsigned long *ret_step,
+    unsigned long *ret_ds_num,
+    char ***ret_ds_names,
+    rrd_value_t **ret_data)
+{
+  char buffer[4096];
+  size_t buffer_size;
+
+  time_t start;
+  time_t end;
+  unsigned long step;
+  unsigned long ds_num;
+  char **ds_names;
+  rrd_value_t *data;
+
+  rrdc_response_t *res;
+
+
+  int status;
+  
+  
+  if ((filename == NULL) || (cf == NULL))
+    return (-1);
+
+  rrdc_command(filename, cf, ret_start, ret_end, &buffer, &buffer_size);
+  res = NULL;
+  status = request (buffer, buffer_size, &res);
+  if (status != 0)
+    return (status);
+    
+  status = res->status;
+  if (status < 0)
+  {
+    rrd_set_error ("rrdcached: %s", res->message);
+    response_free (res);
+    return (status);
+  }
+  /* }}} Send request */
+  
+  populate_gdes(res, &start, &end, &step, 
+                &ds_num, &ds_names, &data);
+
+  *ret_start = start;
+  *ret_end = end;
+  *ret_step = step;
+  *ret_ds_num = ds_num;
+  *ret_ds_names = ds_names;
+  *ret_data = data;
+
+  return 0;
+}
+
+
+int set_conn_to( /*Sets the connect timeout as user defined*/ 
     int c_timeout)
 {
   conn_timeout = c_timeout;
   return 0;
 }
 
+int set_parallel_fetch( 
+    int p_fetch)
+{
+  parallel_fetch = p_fetch;
+  return 0;
+}
+
+FILE* set_stream( 
+    FILE* stream_desc)
+{
+  sh = stream_desc;
+  return 0;
+}
 /* convenience function; if there is a daemon specified, or if we can
  * detect one from the environment, then flush the file.  Otherwise, no-op
  */

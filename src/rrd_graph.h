@@ -13,6 +13,7 @@
 #include <cairo-pdf.h>
 #include <cairo-svg.h>
 #include <cairo-ps.h>
+#include <ev.h>
 
 #include <pango/pangocairo.h>
 
@@ -174,6 +175,9 @@ typedef struct graph_desc_t {
     time_t    xrule;    /* time for x rule line and for VDEF */
     vdef_t    vf;       /* instruction for VDEF function */
     rpnp_t   *rpnp;     /* instructions for CDEF function */
+    int       generate_nan; /* boolean. Indicates if nan series had been generated for this gdes */
+    //int       all_fetched; // bool. 0 if there's more to be read from the socket and 1 if reading done.
+
 
     /* SHIFT implementation */
     int       shidx;    /* gdes reference for offset (-1 --> constant) */
@@ -184,6 +188,8 @@ typedef struct graph_desc_t {
     time_t    start, end;   /* timestaps for first and last data element */
     time_t    start_orig, end_orig; /* timestaps for first and last data element */
     unsigned long step; /* time between samples */
+    unsigned long ft_step; /* time between samples. Fetch adjusted step */
+    int pf; //bool. Indicates that the data for this fd had been fetched in a parallel fashion.
     unsigned long step_orig;    /* time between samples */
     unsigned long ds_cnt;   /* how many data sources are there in the fetch */
     long      data_first;   /* first pointer to this data */
@@ -210,7 +216,9 @@ typedef struct image_desc_t {
     int       nan_fill;    /* boolean. If true, generate nan if fetch does not succeed? */
     int       conn_to;    /* boolean. If true, connect to rrdcached using user-specified timeout */
     int       c_timeout;  /*Connect timeout*/
-    int       generate_nan; /* boolean. Indicates if nan series had been generated or not */
+    int       generate_nan; /* boolean. Indicates if nan series had been generated or not. User-deined */
+    int       parallel_fetch; /* boolean. Indicates if fetch should be performed parallel. User-defined */
+    int       pf_timeout;  /*Parallel fetch timeout*/
     double    tot_heat_height; /*total height of the heat-map*/
     long      xsize, ysize; /* graph area size in pixels */
     struct gfx_color_t graph_col[__GRC_END__];  /* real colors for the graph */
@@ -240,6 +248,9 @@ typedef struct image_desc_t {
     rrd_value_t minval, maxval; /* extreme values in the data */
     int       rigid;    /* do not expand range even with 
                            values outside */
+
+    //int       timeout; //bool. 1 if the overall time for remote data fetching expired.
+
     ygrid_scale_t ygrid_scale;  /* calculated y axis grid info */
     int       gridfit;  /* adjust y-axis range etc so all
                            grindlines falls in integer pixel values */
@@ -330,10 +341,58 @@ void      reduce_data(
     unsigned long *,
     unsigned long *,
     rrd_value_t **);
+
+int    perform_local_fetches(
+    image_desc_t *im);
+
+int perform_remote_fetches(
+    image_desc_t *im);
+
 int       data_fetch(
     image_desc_t *);
+
+void close_conn(
+    struct ev_io w, 
+    struct ev_loop * loop);
+
+const char *pf_error(
+    int fd, int err);
+
+void bytes_to_soc(
+    int written, 
+    size_t* tot_written, 
+    size_t* remaining);
+
+/*
+void cp_to_result(
+    struct fetch_context *w, 
+    int buffer_pos);
+
+void inspect_buf(
+    struct fetch_context *w, 
+    long bytes, 
+    struct ev_loop *loop);
+*/
+
+static void      cb_func_w(
+    struct ev_loop *loop, 
+    ev_io *w, int revents);
+
+static void cb_func_r(
+    struct ev_loop *loop, 
+    ev_io *w, int revents);
+
+static void timeout_cb (
+    EV_P_ ev_timer *w, 
+    int revents);
+
+void fix_step(
+    image_desc_t *im, int i);
+/*void fix_step(
+    image_desc_t *im);*/
+
 int       generate_nan(
-    image_desc_t *, int);
+    graph_desc_t *, int, char *);
 long      find_var(
     image_desc_t *,
     char *);

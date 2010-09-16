@@ -35,6 +35,7 @@
 
 #include "rrd_graph.h"
 #include "rrd_client.h"
+#include <assert.h>
 
 /* some constant definitions */
 
@@ -173,6 +174,25 @@ gfx_color_t graph_col[] =   /* default colors */
 # define DPRINT(x)
 #endif
 
+struct fetch_context{
+    ev_io io;
+    /*Write callback*/
+    size_t bytes_written;
+    size_t length_remaining;
+    size_t command_size;
+    char *w_buf_ptr;
+    char write_buffer[4096];
+    /*Read callback*/
+    size_t bytes_read;
+    size_t cur_line_bytes;
+    size_t lines_read; // number of new lines
+    rrdc_response_t *res; 
+    char read_buffer[4096];
+    graph_desc_t *w_gdes; //watcher's gdes.
+    int nan_fill; // bool. If true, rrdgraph will generate NaN in case fetch does not succeed
+};
+
+int event_loop_timeout = 0;
 
 /* initialize with xtr(im,0); */
 int xtr(
@@ -639,11 +659,13 @@ void reduce_data(
     unsigned long *step,    /* ... adjusted to represent reality    */
     unsigned long *ds_cnt,  /* number of data sources in file */
     rrd_value_t **data)
-{                       /* two dimensional array containing the data */
+{
+                           /* two dimensional array containing the data */
     int       i, reduce_factor = ceil((double) (*step) / (double) cur_step);
     unsigned long col, dst_row, row_cnt, start_offset, end_offset, skiprows =
         0;
     rrd_value_t *srcptr, *dstptr;
+
 
     (*step) = cur_step * reduce_factor; /* set new step size for reduced data */
     dstptr = *data;
@@ -803,164 +825,28 @@ void reduce_data(
 #endif
 }
 
-
-/* get the data required for the graphs from the
-   relevant rrds ... */
-
-int data_fetch(
-    image_desc_t *im)
-{
-    int       i, ii;
-    int       skip;
-
-    set_conn_to(im->c_timeout);
-
-    /* pull the data from the rrd files ... */
-    for (i = 0; i < (int) im->gdes_c; i++) {
-        /* only GF_DEF elements fetch data */
-        if (im->gdes[i].gf != GF_DEF)
-            continue;
-        skip = 0;
-        /* do we have it already ? */
-        if(!im->generate_nan){
-            for (ii = 0; ii < i; ii++) {
-                if (im->gdes[ii].gf != GF_DEF)
-                    continue;
-                if ((strcmp(im->gdes[i].rrd, im->gdes[ii].rrd) == 0)
-                    && (im->gdes[i].cf == im->gdes[ii].cf)
-                    && (im->gdes[i].cf_reduce == im->gdes[ii].cf_reduce)
-                    && (im->gdes[i].start_orig == im->gdes[ii].start_orig)
-                    && (im->gdes[i].end_orig == im->gdes[ii].end_orig)
-                    && (im->gdes[i].step_orig == im->gdes[ii].step_orig)) {
-                    /* OK, the data is already there.
-                     ** Just copy the header portion
-                     */
-                    im->gdes[i].start = im->gdes[ii].start;
-                    im->gdes[i].end = im->gdes[ii].end;
-                    im->gdes[i].step = im->gdes[ii].step;
-                    im->gdes[i].ds_cnt = im->gdes[ii].ds_cnt;
-                    im->gdes[i].ds_namv = im->gdes[ii].ds_namv;
-                    im->gdes[i].data = im->gdes[ii].data;
-                    im->gdes[i].data_first = 0;
-                    skip = 1;
-                }
-                if (skip)
-                    break;
-            }
-        }
-        if (!skip) {
-            unsigned long ft_step = im->gdes[i].step;   /* ft_step will record what we got from fetch */
-            const char *rrd_daemon;
-            int status;
-
-            if (im->gdes[i].daemon[0] != 0){
-                rrd_daemon = im->gdes[i].daemon;
-            }else{
-                rrd_daemon = im->daemon_addr;
-            }
-            /* "daemon" may be NULL. ENV_RRDCACHED_ADDRESS is evaluated in that
-             * case. If "daemon" holds the same value as in the previous
-             * iteration, no actual new connection is established - the
-             * existing connection is re-used. */
-            // rrdc_connect (rrd_daemon);
-            /* If connecting was successfull, use the daemon to query the data.
-             * If there is no connection, for example because no daemon address
-             * was specified, (try to) use the local file directly. */
-            if (rrd_daemon != NULL)
-            {
-                status = rrdc_connect (rrd_daemon);
-                if (!status)
-                {
-                    status = rrdc_fetch (im->gdes[i].rrd,
-                            cf_to_string (im->gdes[i].cf),
-                            &im->gdes[i].start,
-                            &im->gdes[i].end,
-                            &ft_step,
-                            &im->gdes[i].ds_cnt,
-                            &im->gdes[i].ds_namv,
-                            &im->gdes[i].data);
-                    if (status != 0){
-                        generate_nan(im, i);
-                        im->generate_nan = 1;
-                    }else{
-                        im->generate_nan = 0;
-                    }
-                }else
-                {
-                    generate_nan(im, i);
-                    im->generate_nan = 1;
-                }
-            }
-            else
-            {
-                status = rrd_fetch_fn(im->gdes[i].rrd,
-                                im->gdes[i].cf,
-                                &im->gdes[i].start,
-                                &im->gdes[i].end,
-                                &ft_step,
-                                &im->gdes[i].ds_cnt,
-                                &im->gdes[i].ds_namv,
-                                &im->gdes[i].data); 
-                if(status == -1){
-                    generate_nan(im, i);
-                    im->generate_nan = 1;
-                }else{
-                    im->generate_nan = 0;
-                }
-            }   
-            im->gdes[i].data_first = 1;
-
-            if (ft_step < im->gdes[i].step) {
-                reduce_data(im->gdes[i].cf_reduce,
-                            ft_step,
-                            &im->gdes[i].start,
-                            &im->gdes[i].end,
-                            &im->gdes[i].step,
-                            &im->gdes[i].ds_cnt, &im->gdes[i].data);
-            } else {
-                im->gdes[i].step = ft_step;
-            }
-        }
-        
-        /* lets see if the required data source is really there */
-        for (ii = 0; ii < (int) im->gdes[i].ds_cnt; ii++) {
-            if (strcmp(im->gdes[i].ds_namv[ii], im->gdes[i].ds_nam) == 0) {
-                im->gdes[i].ds = ii;
-            }
-        }
-        if (im->gdes[i].ds == -1) {
-            rrd_set_error("No DS called '%s' in '%s'",
-                          im->gdes[i].ds_nam, im->gdes[i].rrd);
-            return -1;
-        }
-
-    }
-    return 0;
-}
-
 int generate_nan(
-    image_desc_t *im, int i)
+    graph_desc_t *gdes, int nan_fill, char *err_str)
 {
-    if(im->nan_fill){
-        printf("############### GENERATING NaN ################\n");
-        im->gdes[i].ds_cnt = 1;
-//        printf("Number of DS %d\n", im->gdes[i].ds_cnt);
+    if(nan_fill){
+        printf("############### GENERATING NaN ################\nReason: %s\n", err_str);
+        gdes->ds_cnt = 1;
 
-        im->gdes[i].ds_namv = calloc(im->gdes[i].ds_cnt, sizeof(char*));
-        for (int l = 0; l < (int) im->gdes[i].ds_cnt; l++) {
-            im->gdes[i].ds_namv[l] = (char*)malloc(sizeof(char) * DS_NAM_SIZE);
-            strncpy(im->gdes[i].ds_namv[l], im->gdes[i].ds_nam, DS_NAM_SIZE - 1);
+        gdes->ds_namv = calloc(gdes->ds_cnt, sizeof(char*));
+        for (int l = 0; l < (int) gdes->ds_cnt; l++) {
+            gdes->ds_namv[l] = (char*)malloc(sizeof(char) * DS_NAM_SIZE);
+            strncpy(gdes->ds_namv[l], gdes->ds_nam, DS_NAM_SIZE - 1);
         }
 
-        unsigned long int data_size = im->gdes[i].ds_cnt * (im->gdes[i].end
-                    - im->gdes[i].start)/im->gdes[i].step;
+        unsigned long int data_size = gdes->ds_cnt * (gdes->end
+                    - gdes->start)/gdes->step;
         rrd_value_t *data;
         data = (rrd_value_t *) calloc (data_size, sizeof (rrd_value_t));
 
         if(data == NULL)
             rrd_set_error("Failed allocating memory for NaN data.");
 
-        im->gdes[i].data = data;
+        gdes->data = data;
         unsigned long int k = 0;
         for (k = 0; k < data_size; k ++)
         {
@@ -971,6 +857,628 @@ int generate_nan(
     }
     return 0;
 }
+
+void close_conn(struct ev_io w, struct ev_loop * loop)
+{
+    //ev_io_stop(loop, &w);
+    close(w.fd);
+}
+
+/*RRDtool has a function for error reporting*/
+const char *pf_error(int fd, int err)
+{
+    printf("FD %d Error writing: %s errno %d\n", fd, strerror(err), err);
+    if(errno == ECONNREFUSED || err == EHOSTUNREACH || err == ETIMEDOUT) // If the connection is refused, times out or there's no route to the host, then generate nan if user defined so.
+        printf("Will generate nan, because cannot connect\n");
+    return 0;
+}
+
+/* calculates how many bytes have been written 
+*  to the socket and how many are there left */
+void bytes_to_soc(int written, size_t *tot_written, size_t *remaining)
+{
+    size_t total_bytes = *tot_written;
+    
+    *tot_written = total_bytes + written;
+    *remaining -= written;
+}
+
+/*Copies the output read to the "result" data structure.*/
+void cp_to_result(struct fetch_context *w, int buffer_pos)
+{
+    int res_length = w->cur_line_bytes -1; //exclude "\n"
+    char* tmp_buffer = malloc(res_length + 1);
+    assert(tmp_buffer);
+    memcpy(tmp_buffer, 
+          (void* ) &w->read_buffer[buffer_pos + 1 - w->cur_line_bytes], /*+1 not to copy the new line from the first line (the status message)*/
+          res_length);
+    tmp_buffer[res_length+1] = '\0';
+    w->res->lines[w->lines_read - 2] = tmp_buffer; // subtract 1 to reach to index 0 and 1 for not copying the first line (the status msg)
+}
+
+/*Inspects the read buffer. Checks if reading is DONE.*/
+void inspect_buf(struct fetch_context *w, long bytes, struct ev_loop *loop)
+{
+    size_t i;
+    size_t total_line_bytes = 0;
+
+    w->bytes_read += bytes;
+
+    for(i=w->bytes_read-bytes; i<w->bytes_read; i++)
+    {
+        w->cur_line_bytes++;
+        if(w->read_buffer[i] == '\n')
+        {
+            w->lines_read++;
+            if(1==w->lines_read)
+            {
+                w->res->status = atoi(w->read_buffer);
+                /* rrdcached returns -1 if there is a 
+                * problem with fetching after connect. 
+                * In this case we need to generate nan 
+                * if user defined so.*/
+                if(w->res->status == -1) 
+                {
+                    w->w_gdes->generate_nan = 1;
+                    close_conn(w->io, loop);
+                    return;
+                }
+                w->res->lines_num = (size_t) w->res->status;
+                /* if there is no, data stop and return */
+                if(0 == w->res->lines_num) 
+                {
+                    close_conn(w->io, loop);
+                    return;
+                }
+                w->res->lines = (char **) malloc (sizeof (char *) * w->res->lines_num);
+                assert(w->res->lines);
+                memset (w->res->lines, 0, sizeof (char *) * w->res->lines_num);
+                total_line_bytes += w->cur_line_bytes; 
+            }
+            else
+            {
+                cp_to_result(w, i);
+                total_line_bytes += w->cur_line_bytes; 
+            }
+            w->cur_line_bytes = 0;
+        }
+    }
+    size_t bytes_remaining = w->bytes_read - total_line_bytes;
+    memcpy(&w->read_buffer, &w->read_buffer[total_line_bytes], bytes_remaining);
+    w->bytes_read = bytes_remaining;
+}
+
+static void cb_func_w (struct ev_loop *loop, ev_io *w_, int revents)
+{
+    struct fetch_context *w = (struct fetch_context *)w_;
+    int written;
+   
+    written = write(w->io.fd, w->write_buffer+w->bytes_written, w->length_remaining);
+    if (-1 == written) //if -1 => failed to write. Check why and close connection.
+    {
+        pf_error(w->io.fd, errno);
+        close_conn(w->io, loop);
+    }
+    else
+    {
+        bytes_to_soc(written, &w->bytes_written, &w->length_remaining);
+    }
+   
+    if(w->bytes_written == w->command_size)
+    {
+        ev_io_stop(EV_A_ &w->io);
+    }
+}
+
+
+static void cb_func_r(struct ev_loop *loop, ev_io *w_, int revents)
+{
+    struct fetch_context *w = (struct fetch_context *)w_;
+    if(w->res == NULL)
+    {
+        w->res = malloc(sizeof(rrdc_response_t));
+        assert(w->res);
+        memset(w->res, 0, sizeof(rrdc_response_t));
+    }
+
+    long bytes;
+    bytes = read(w->io.fd, w->read_buffer+w->bytes_read, (4096 - w->bytes_read));
+    if(bytes == -1) //if -1 => failed to read. Check why and close connection.
+    {
+        w->w_gdes->generate_nan = 1;
+        pf_error(w->io.fd, errno);
+        close_conn(w->io, loop);
+    }
+    
+    inspect_buf(w, bytes, loop);    
+      
+    if(!w->w_gdes->generate_nan)
+    {
+        if(w->res->lines_num == w->lines_read - 1)
+        {
+            populate_gdes(w->res, 
+                          &w->w_gdes->start,
+                          &w->w_gdes->end,
+                          &w->w_gdes->ft_step,
+                          &w->w_gdes->ds_cnt,
+                          &w->w_gdes->ds_namv,
+                          &w->w_gdes->data);
+            fprintf(stderr,"After populate ds_namv is %s\n", w->w_gdes->ds_namv[0]);
+            ev_io_stop(EV_A_ &w->io);
+        }
+    } else {
+        ev_io_stop(EV_A_ &w->io);
+    }
+}
+
+static void timeout_cb (EV_P_ ev_timer *w, int revents)
+{
+    puts("timeout");
+    event_loop_timeout = 1;
+    ev_unloop (EV_A_ EVUNLOOP_ONE);
+}
+
+
+void fix_step(
+    image_desc_t *im, int i)
+{
+    int ii;
+    im->gdes[i].data_first = 1;
+    if (im->gdes[i].ft_step < im->gdes[i].step) {
+        reduce_data(im->gdes[i].cf_reduce,
+                    im->gdes[i].ft_step,
+                    &im->gdes[i].start,
+                    &im->gdes[i].end,
+                    &im->gdes[i].step,
+                    &im->gdes[i].ds_cnt, &im->gdes[i].data);
+    } else {
+        im->gdes[i].step = im->gdes[i].ft_step;
+    }
+    
+    // lets see if the required data source is really there
+    for (ii = 0; ii < (int) im->gdes[i].ds_cnt; ii++) {
+        printf("Comparing nam ^^%s^^ and namv ^^%s^^ %d\n",im->gdes[i].ds_nam, im->gdes[i].ds_namv[ii], strcmp(im->gdes[i].ds_namv[ii], im->gdes[i].ds_nam));
+        if (strcmp(im->gdes[i].ds_namv[ii], im->gdes[i].ds_nam) == 0) {
+            im->gdes[i].ds = ii;
+        }
+    }
+    if (im->gdes[i].ds == -1) {
+        if(im->nan_fill){
+            im->gdes[i].generate_nan = 1;
+        } else {
+            rrd_set_error("No DS called '%s' in '%s'",
+                      im->gdes[i].ds_nam, im->gdes[i].rrd);
+        }
+    }
+}
+/*
+void fix_step(
+    image_desc_t *im)
+{
+    int i, ii;
+    printf("gdes_c %ld\n", im->gdes_c);
+    for(i = 0; i < (int) im->gdes_c; i++)
+    {
+        if (im->gdes[i].gf != GF_DEF)
+            continue;
+        printf("fixing with step %lu\n", im->gdes[i].ft_step);
+        im->gdes[i].data_first = 1;
+        if (im->gdes[i].ft_step < im->gdes[i].step) {
+            reduce_data(im->gdes[i].cf_reduce,
+                        im->gdes[i].ft_step,
+                        &im->gdes[i].start,
+                        &im->gdes[i].end,
+                        &im->gdes[i].step,
+                        &im->gdes[i].ds_cnt, &im->gdes[i].data);
+        } else {
+            printf("Not calling reduce\n");
+            im->gdes[i].step = im->gdes[i].ft_step;
+        }
+        // lets see if the required data source is really there
+        for (ii = 0; ii < (int) im->gdes[i].ds_cnt; ii++) {
+            if (strcmp(im->gdes[i].ds_namv[ii], im->gdes[i].ds_nam) == 0) {
+                im->gdes[i].ds = ii;
+            }
+        }
+        if (im->gdes[i].ds == -1) {
+            rrd_set_error("No DS called '%s' in '%s'",
+                          im->gdes[i].ds_nam, im->gdes[i].rrd);
+            im->gdes[i].all_fetched = 0;
+            generate_nan(&im->gdes[i], im->nan_fill, "Invalid DS name");
+        }
+    }
+}*/
+
+int perform_local_fetches(
+    image_desc_t *im)
+{
+    int       i, ii;
+    int       skip;
+
+    /* pull the data from the rrd files ... */
+    for (i = 0; i < (int) im->gdes_c; i++) {
+        const char *rrd_daemon;
+
+        if (im->gdes[i].daemon[0] != 0){
+            rrd_daemon = im->gdes[i].daemon;
+        }else{
+            rrd_daemon = im->daemon_addr;
+        }
+
+        im->gdes[i].generate_nan = 0;
+        /* only GF_DEF elements fetch data */
+        if (im->gdes[i].gf != GF_DEF)
+            continue;
+        skip = 0;
+        /* do we have it already ? */
+        for (ii = 0; ii < i; ii++) {
+            if (im->gdes[ii].gf != GF_DEF)
+                continue;
+            if ((strcmp(im->gdes[i].rrd, im->gdes[ii].rrd) == 0)
+                && (im->gdes[i].cf == im->gdes[ii].cf)
+                && (im->gdes[i].cf_reduce == im->gdes[ii].cf_reduce)
+                && (im->gdes[i].start_orig == im->gdes[ii].start_orig)
+                && (im->gdes[i].end_orig == im->gdes[ii].end_orig)
+                && (im->gdes[i].step_orig == im->gdes[ii].step_orig)) {
+                /* OK, the data is already there.
+                 ** Just copy the header portion
+                 */
+                im->gdes[i].start = im->gdes[ii].start;
+                im->gdes[i].end = im->gdes[ii].end;
+                im->gdes[i].step = im->gdes[ii].step;
+                im->gdes[i].ds_cnt = im->gdes[ii].ds_cnt;
+                im->gdes[i].ds_namv = im->gdes[ii].ds_namv;
+                im->gdes[i].data = im->gdes[ii].data;
+                im->gdes[i].data_first = 0;
+                /*DON'T SKIP fetching, if nan has been generated for this gdes*/
+                if(!im->gdes[ii].generate_nan) 
+                    skip = 1;
+            }
+            if (skip)
+                break;
+        }
+        if (!skip) {
+            int status;
+            unsigned long ft_step = im->gdes[i].step;   /* ft_step will record what we got from fetch */
+
+            /* "daemon" may be NULL. ENV_RRDCACHED_ADDRESS is evaluated in that
+             * case. If "daemon" holds the same value as in the previous
+             * iteration, no actual new connection is established - the
+             * existing connection is re-used. */
+            // rrdc_connect (rrd_daemon);
+            /* If connecting was successfull, use the daemon to query the data.
+             * If there is no connection, for example because no daemon address
+             * was specified, (try to) use the local file directly. */
+            if (rrd_daemon == NULL)
+            {
+                status = rrd_fetch_fn(im->gdes[i].rrd,
+                                im->gdes[i].cf,
+                                &im->gdes[i].start,
+                                &im->gdes[i].end,
+                                &ft_step,
+                                //&im->gdes[i].ft_step,
+                                &im->gdes[i].ds_cnt,
+                                &im->gdes[i].ds_namv,
+                                &im->gdes[i].data); 
+                if(status == -1){
+                    if(generate_nan(&im->gdes[i], im->nan_fill, "Couldn't find file") == -1)
+                        return -1;
+                }else{
+                    im->gdes[i].generate_nan = 0;
+                }
+            }   
+            im->gdes[i].data_first = 1;
+            if (ft_step < im->gdes[i].step) {
+            //if (im->gdes[i].ft_step < im->gdes[i].step) {
+                reduce_data(im->gdes[i].cf_reduce,
+                    ft_step,
+                    //im->gdes[i].ft_step,
+                    &im->gdes[i].start,
+                    &im->gdes[i].end,
+                    &im->gdes[i].step,
+                    &im->gdes[i].ds_cnt, &im->gdes[i].data);
+            } else {
+                im->gdes[i].step = ft_step;
+                //im->gdes[i].step = im->gdes[i].ft_step;
+            }
+        }
+        for (ii = 0; ii < (int) im->gdes[i].ds_cnt; ii++) {
+            if (strcmp(im->gdes[i].ds_namv[ii], im->gdes[i].ds_nam) == 0) {
+                im->gdes[i].ds = ii;
+            }
+        }
+        if (rrd_daemon == NULL)
+        {
+            if (im->gdes[i].ds == -1) {
+                rrd_set_error("No DS called '%s' in '%s'",
+                              im->gdes[i].ds_nam, im->gdes[i].rrd);
+                if(generate_nan(&im->gdes[i], im->nan_fill, "Invalid DS name") == -1)
+                    return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+int perform_remote_fetches(
+    image_desc_t *im)
+{
+    int       i, ii;
+    int       skip;
+    int       remotes = 0;
+    for (i = 0; i < (int) im->gdes_c; i++) {
+        if (im->gdes[i].daemon[0] != 0)
+            remotes++;
+    }
+    if (remotes == 0 && im->daemon_addr != NULL){
+        for (i = 0; i < (int) im->gdes_c; i++){
+            if(im->gdes[i].gf == GF_DEF)
+                remotes++;
+        }
+    }
+
+    if(remotes == 0)
+    {
+        return 0;
+    }
+
+    char command_buffer[4096];
+    size_t command_buffer_size;
+    struct fetch_context* watcher = (struct fetch_context *) malloc(2*remotes*sizeof(struct fetch_context));
+    assert(watcher);
+    memset(watcher, 0, sizeof(struct fetch_context));
+    
+    ev_timer timeout_watcher;
+    
+    int *sd = (int *) malloc(remotes * sizeof(int));
+    assert(sd);
+    memset(sd, 0, sizeof(int));
+
+    int rem_idx = 0; // remote fetch index
+
+    struct ev_loop *loop = ev_default_loop(0);
+    
+    set_conn_to(im->c_timeout);
+
+    /* pull the data from the rrd files ... */
+    for (i = 0; i < (int) im->gdes_c; i++) {
+        im->gdes[i].generate_nan = 0;
+        const char *rrd_daemon;
+        if (im->gdes[i].daemon[0] != 0){
+            rrd_daemon = im->gdes[i].daemon;
+        }else{
+            rrd_daemon = im->daemon_addr;
+        }
+        /* only GF_DEF elements fetch data */
+        if (im->gdes[i].gf != GF_DEF)
+            continue;
+        skip = 0;
+        /* do we have it already ? */
+        for (ii = 0; ii < i; ii++) {
+            if (im->gdes[ii].gf != GF_DEF)
+                continue;
+            if ((strcmp(im->gdes[i].rrd, im->gdes[ii].rrd) == 0)
+                && (im->gdes[i].cf == im->gdes[ii].cf)
+                && (im->gdes[i].cf_reduce == im->gdes[ii].cf_reduce)
+                && (im->gdes[i].start_orig == im->gdes[ii].start_orig)
+                && (im->gdes[i].end_orig == im->gdes[ii].end_orig)
+                && (im->gdes[i].step_orig == im->gdes[ii].step_orig)) {
+                /* OK, the data is already there.
+                 ** Just copy the header portion
+                 */
+                im->gdes[i].start = im->gdes[ii].start;
+                im->gdes[i].end = im->gdes[ii].end;
+                im->gdes[i].step = im->gdes[ii].step;
+                im->gdes[i].ds_cnt = im->gdes[ii].ds_cnt;
+                im->gdes[i].ds_namv = im->gdes[ii].ds_namv;
+                im->gdes[i].data = im->gdes[ii].data;
+                im->gdes[i].data_first = 0;
+                if(!im->gdes[ii].generate_nan) 
+                    skip = 1;
+            }
+            if (skip)
+                break;
+        }
+        if (!skip) {
+            int status;
+            int command_tot_length;
+            unsigned long ft_step = im->gdes[i].step;   /* ft_step will record what we got from fetch */
+
+            
+            /* "daemon" may be NULL. ENV_RRDCACHED_ADDRESS is evaluated in that
+             * case. If "daemon" holds the same value as in the previous
+             * iteration, no actual new connection is established - the
+             * existing connection is re-used. */
+            // rrdc_connect (rrd_daemon);
+            /* If connecting was successfull, use the daemon to query the data.
+             * If there is no connection, for example because no daemon address
+             * was specified, (try to) use the local file directly. */
+            if (rrd_daemon != NULL)
+            {
+                if(im->parallel_fetch)
+                {
+                    im->gdes[i].pf = 1;
+                    set_parallel_fetch(im->parallel_fetch);
+                    sd[rem_idx] = rrdc_connect(rrd_daemon);
+                    if(sd[rem_idx] >= 0)
+                    {
+                        printf("Will init all the event loop stuff \n");
+                        //printf("generate_nan = %d\n", im->gdes[i].generate_nan);
+                        // Compose the rrdtool fetch command
+                        rrdc_command(im->gdes[i].rrd,
+                                     cf_to_string (im->gdes[i].cf),
+                                     &im->gdes[i].start,
+                                     &im->gdes[i].end, 
+                                     &command_buffer, 
+                                     &command_buffer_size);
+                        command_tot_length = sizeof(command_buffer);
+                        /*Init write callback*/
+                        memset(&watcher[2*rem_idx], 0, sizeof(struct fetch_context));
+                        memset(&watcher[2*rem_idx + 1], 0, sizeof(struct fetch_context));
+                        watcher[2*rem_idx].io.fd = sd[rem_idx];
+                        watcher[2*rem_idx+1].io.fd = sd[rem_idx];
+                        watcher[2*rem_idx].command_size = command_tot_length;
+                        watcher[2*rem_idx+1].command_size = command_tot_length;
+                        strcpy(watcher[2*rem_idx].write_buffer, command_buffer);
+                        strcpy(watcher[2*rem_idx+1].write_buffer, command_buffer); 
+                        watcher[2*rem_idx].length_remaining = sizeof(command_buffer); 
+                        watcher[2*rem_idx+1].length_remaining = sizeof(command_buffer);
+                        watcher[2*rem_idx].w_buf_ptr = &command_buffer[0];
+                        watcher[2*rem_idx+1].w_buf_ptr = &command_buffer[0];
+                        /*Init read callback*/
+                        memset(watcher[2*rem_idx].read_buffer, 0, sizeof(watcher[2*rem_idx].read_buffer));
+                        memset(watcher[2*rem_idx+1].read_buffer, 0, sizeof(watcher[2*rem_idx+1].read_buffer)); 
+                        watcher[2*rem_idx].w_gdes = &im->gdes[i]; 
+                        watcher[2*rem_idx + 1].w_gdes = &im->gdes[i]; 
+                        watcher[2*rem_idx].nan_fill = im->nan_fill; 
+                        watcher[2*rem_idx + 1].nan_fill = im->nan_fill; 
+
+                        ev_io_init(&watcher[2*rem_idx].io, cb_func_w, sd[rem_idx], EV_WRITE);
+                        ev_io_start(loop, &watcher[2*rem_idx].io);
+                        //printf("Writing ? %d\n", ev_is_active(&watcher[2*rem_idx].io)); 
+
+                        ev_io_init(&watcher[2*rem_idx+1].io, cb_func_r, sd[rem_idx], EV_READ);
+                        ev_io_start(loop, &watcher[2*rem_idx+1].io);
+                        //printf("Reading ? %d\n", ev_is_active(&watcher[2*rem_idx + 1].io)); 
+                    } else {
+                        printf("Could not connect. Will set generate_nan\n");
+                        im->gdes[i].generate_nan = 1;
+                    }
+                }
+                else
+                {
+                    status = rrdc_connect (rrd_daemon);
+                    if (status==0)
+                    {
+                        status = rrdc_fetch (im->gdes[i].rrd,
+                                cf_to_string (im->gdes[i].cf),
+                                &im->gdes[i].start,
+                                &im->gdes[i].end,
+                                &ft_step,
+                                //&im->gdes[i].ft_step,
+                                &im->gdes[i].ds_cnt,
+                                &im->gdes[i].ds_namv,
+                                &im->gdes[i].data);
+                        if (status != 0){
+                            if(generate_nan(&im->gdes[i], im->nan_fill, "Could not find remote file"))
+                                return -1;
+                        }else{
+                            im->gdes[i].generate_nan = 0;
+                            //im->gdes[i].all_fetched = 1;
+                        }
+                    }else if(status == -1)
+                    {
+                        if(generate_nan(&im->gdes[i], im->nan_fill, "Could not connect"))
+                            return -1;
+                    }
+                }
+                rem_idx++;
+            }
+            
+            
+            if(!im->parallel_fetch)
+            {
+                im->gdes[i].data_first = 1;
+                if (ft_step < im->gdes[i].step) {
+                //if (im->gdes[i].ft_step < im->gdes[i].step) {
+                    reduce_data(im->gdes[i].cf_reduce,
+                        ft_step,
+                        //im->gdes[i].ft_step,
+                        &im->gdes[i].start,
+                        &im->gdes[i].end,
+                        &im->gdes[i].step,
+                        &im->gdes[i].ds_cnt, &im->gdes[i].data);
+                } else {
+                    im->gdes[i].step = ft_step;
+                    //im->gdes[i].step = im->gdes[i].ft_step;
+                }
+            }
+        }
+        /* lets see if the required data source is really there */
+       
+        if(!im->parallel_fetch)
+        {
+            for (ii = 0; ii < (int) im->gdes[i].ds_cnt; ii++) {
+                if (strcmp(im->gdes[i].ds_namv[ii], im->gdes[i].ds_nam) == 0) {
+                    im->gdes[i].ds = ii;
+                } 
+            }
+            if (rrd_daemon != NULL)
+            {
+                if (im->gdes[i].ds == -1) {
+                    rrd_set_error("No DS called '%s' in '%s'",
+                                  im->gdes[i].ds_nam, im->gdes[i].rrd);
+                    if(generate_nan(&im->gdes[i], im->nan_fill, "Invalid DS name")==-1)
+                        return -1;
+                }
+            }
+        }
+    }
+
+
+    if(im->parallel_fetch)
+    {
+        printf("pf timeout %d\n", im->pf_timeout);
+        ev_timer_init (&timeout_watcher, timeout_cb, im->pf_timeout, 0.);
+        //ev_timer_init (&timeout_watcher, timeout_cb, 7, 0.);
+        ev_timer_start (loop, &timeout_watcher);
+        ev_unref(loop);
+        ev_loop (loop, 0);
+    }
+    return 0;
+}
+
+
+/* get the data required for the graphs from the
+   relevant rrds ... */
+int data_fetch(
+    image_desc_t *im)
+{
+    int i;
+    if(perform_local_fetches(im) == -1)
+        return -1;
+    if(perform_remote_fetches(im) == -1)
+        return -1;
+    if(event_loop_timeout) 
+        return -1;
+
+    if(im->parallel_fetch)
+    {
+        for(i=0; i<im->gdes_c; i++)
+        {
+            if (im->gdes[i].gf == GF_DEF)
+            {
+                //fprintf(stderr, "During data+fetch is %s\n", im->gdes[i].ds_namv[0]);
+                if(im->gdes[i].pf == 1 && im->gdes[i].generate_nan == 0)
+                {
+                    printf("aaaaaaaaaa\n");
+                    printf("File %s\n", im->gdes[i].rrd);
+                    printf("Flag generate_nan = %d\n", im->gdes[i].generate_nan);
+                    printf("Flag pf = %d\n", im->gdes[i].pf);
+                    fix_step(im, i);
+                } 
+                if(im->gdes[i].pf == 1 && im->gdes[i].generate_nan == 1)
+                {
+                    printf("bbbbbbbbbbbbbbb\n");
+                    printf("File %s\n", im->gdes[i].rrd);
+                    printf("Flag generate_nan = %d\n", im->gdes[i].generate_nan);
+                    printf("Flag pf = %d\n", im->gdes[i].pf);
+                    im->gdes[i].ft_step = im->gdes[i].step;
+                    if(generate_nan(&im->gdes[i], im->nan_fill, "parallel") == -1)
+                        return -1;
+                    fix_step(im, i);
+                }
+            } 
+        }
+        return 0;
+    } else {
+        return 0;
+    }
+    //fix_step(im);
+    //return 0;
+}
+
+
 
 /* evaluate the expressions in the CDEF functions */
 
@@ -1026,7 +1534,6 @@ long lcd(
 int data_calc(
     image_desc_t *im)
 {
-
     int       gdi;
     int       dataidx;
     long     *steparray, rpi;
@@ -1164,14 +1671,12 @@ int data_calc(
                     long      ptr = im->gdes[gdi].rpnp[rpi].ptr;
                     long      diff =
                         im->gdes[gdi].start - im->gdes[ptr].start;
-
                     if (diff > 0)
                         im->gdes[gdi].rpnp[rpi].data +=
                             (diff / im->gdes[ptr].step) *
                             im->gdes[ptr].ds_cnt;
                 }
             }
-
             if (steparray == NULL) {
                 rrd_set_error("rpn expressions without DEF"
                               " or CDEF variables are not supported");
@@ -1192,8 +1697,7 @@ int data_calc(
                 rpnstack_free(&rpnstack);
                 return -1;
             }
-
-            /* Step through the new cdef results array and
+           /* Step through the new cdef results array and
              * calculate the values
              */
             for (now = im->gdes[gdi].start + im->gdes[gdi].step;
@@ -1204,6 +1708,7 @@ int data_calc(
                  * in this case we are advancing by timesteps;
                  * we use the fact that time_t is a synonym for long
                  */
+                
                 if (rpn_calc(rpnp, &rpnstack, (long) now,
                              im->gdes[gdi].data, ++dataidx) == -1) {
                     /* rpn_calc sets the error string */
@@ -1312,6 +1817,38 @@ int data_proc(
                     if (im->gdes[vidx].gf == GF_VDEF) {
                         value = im->gdes[vidx].vf.val;
                     } else
+                        //fprintf(stderr, "##############################################\n");
+                        //fprintf(stderr,"gr_time %lu\n", gr_time);
+                        ////fprintf(stderr,"im %d\n", im);
+                        ////fprintf(stderr,"im->gdes %d\n", im->gdes[vidx]);
+                        //fprintf(stderr,"start %lu\n", im->gdes[vidx].start);
+                        //fprintf(stderr,"end %lu\n", im->gdes[vidx].end);
+                        //fprintf(stderr,"ds_cnt %lu\n", im->gdes[vidx].ds_cnt);
+                        //fprintf(stderr,"ds %lu\n", im->gdes[vidx].ds);
+                        //fprintf(stderr,"end %lu\n", im->gdes[vidx].end);
+                        //
+                        //fprintf(stderr, "index %lu\n",(unsigned long)floor((double)
+                        //                                (gr_time -
+                        //                                 im->gdes[vidx].
+                        //                                   start)
+                        //                                  /
+                        //                                  im->gdes[vidx].step)
+                        //                         * im->gdes[vidx].ds_cnt +
+                        //                            im->gdes[vidx].ds);
+                        //fprintf(stderr, "%f\n", im->gdes[vidx].data[(unsigned long)
+                        //                            floor((double)
+                        //                                  (gr_time -
+                        //                                   im->gdes[vidx].
+                        //                                   start)
+                        //                                  /
+                        //                                  im->gdes[vidx].step)
+                        //                            * im->gdes[vidx].ds_cnt +
+                        //                            im->gdes[vidx].ds]);
+                        //fprintf(stderr, "data 0 %f\n", im->gdes[vidx].data[0]);
+                        //fprintf(stderr, "data 629 %f\n", im->gdes[vidx].data[629]);
+                        //fprintf(stderr,"start %lu", &im->gdes[vidx].step);
+                        //fprintf(stderr,"start %lu", &im->gdes[vidx].ds_cnt);
+                        //fprintf(stderr,"start %lu", &im->gdes[vidx].ds);
                         if (((long int) gr_time >=
                              (long int) im->gdes[vidx].start)
                             && ((long int) gr_time <
@@ -1320,9 +1857,9 @@ int data_proc(
                                                     floor((double)
                                                           (gr_time -
                                                            im->gdes[vidx].
-                                                           start)
+                                                          start)
                                                           /
-                                                          im->gdes[vidx].step)
+                                                        im->gdes[vidx].step)
                                                     * im->gdes[vidx].ds_cnt +
                                                     im->gdes[vidx].ds];
                     } else {
@@ -3366,6 +3903,11 @@ int graph_paint(
     /* pull the data from the rrd files ... */
     if (data_fetch(im) == -1)
         return -1;
+    /* TODO remove
+    for(i=0; i<1000; i++)
+    {
+        printf("%f\n", im->gdes[6].data[i]);
+    }*/
     /* evaluate VDEF and CDEF operations ... */
     if (data_calc(im) == -1)
         return -1;
@@ -3657,6 +4199,8 @@ int graph_paint(
                         double foreY;
 
                         /* PICKING HEAT COLOR*/
+                        // TODO remove
+                        //printf("Picking heat color for gdes %d data %f\n",i, im->gdes[i].p_data[ii]);
                         color = 
                             gfx_pick_heat_color(im->gdes[i].p_data[ii], 
                                                 im->gdes[i].col2, 
@@ -4307,7 +4851,8 @@ void rrd_graph_init(
     im->heat_gap = 0.0;
     im->heat_base = 0.0;
     im->c_timeout = 0;
-    im->generate_nan = 0;
+    im->pf_timeout = 20;
+    im->parallel_fetch = 0;
 
     im->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 10, 10);
     im->cr = cairo_create(im->surface);
@@ -4394,6 +4939,7 @@ void rrd_graph_options(
         { "font",               required_argument, 0, 'n'},
         { "logarithmic",        no_argument,       0, 'o'},
         { "connect-timeout",    required_argument, 0, 'O'},
+        { "pf-timeout",         required_argument, 0, 'p'},
         { "pango-markup",       no_argument,       0, 'P'},
         { "font-render-mode",   required_argument, 0, 'R'},
         { "rigid",              no_argument,       0, 'r'},
@@ -4422,6 +4968,7 @@ void rrd_graph_options(
         { "grid-dash",          required_argument, 0, 1008},
         { "dynamic-labels",     no_argument,       0, 1009},
         { "nan-fill-unavailable",no_argument,      0, 1010},
+        { "parallel-fetch"      ,no_argument,      0, 1011},
         {  0, 0, 0, 0}
 };
 /* *INDENT-ON* */
@@ -4513,6 +5060,9 @@ void rrd_graph_options(
             break;
         case 'T':
             im->tabwidth = atof(optarg);
+            break;
+        case 'p':
+            im->pf_timeout = atof(optarg);
             break;
         case 'S':
             im->step = atoi(optarg);
@@ -4615,6 +5165,9 @@ void rrd_graph_options(
             break;        
         case 1010: /* Enable generation of nan data series when fetch impossible */
             im->nan_fill = 1;
+            break; 
+        case 1011: /* Enable parallel fetch */
+            im->parallel_fetch = 1;
             break; 
         case 1002: /* right y axis */
 

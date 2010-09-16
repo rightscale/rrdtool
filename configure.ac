@@ -517,6 +517,25 @@ AM_CONDITIONAL(BUILD_LIBDBI,[test $have_libdbi != no])
 
 AM_CONDITIONAL(BUILD_RRDCGI,[test $enable_rrdcgi != no])
 
+AC_ARG_ENABLE(libev,AS_HELP_STRING([--disable-libev],[do not build in support for libev]),[have_libev=yes],[
+  XXX=$LIBS
+  LIBS="$LIBS -lev"
+  AC_MSG_CHECKING(for libev)
+  AC_LINK_IFELSE(
+    [AC_LANG_PROGRAM([[#include <ev.h>]], 
+                     [[ev_timer timeout_watcher;]]
+                    )   
+    ],[AC_DEFINE(HAVE_LIBEVENT,[1],[have got libev installed])
+       AC_MSG_RESULT([yes])
+       have_libev=yes
+    ],[LIBS=$XXX
+       AC_MSG_RESULT([no])
+       have_libev=no
+    ]   
+  )
+])
+
+AM_CONDITIONAL(BUILD_LIBEVENT,[test $have_libev != no])
 
 CORE_LIBS="$LIBS"
 
@@ -962,6 +981,7 @@ echo "          Build rrdcgi: $enable_rrdcgi"
 echo "       Build librrd MT: $enable_pthread"
 echo "           Use gettext: $USE_NLS"
 echo "           With libDBI: $have_libdbi"
+echo "            With libev: $have_libev"
 echo
 echo "             Libraries: $ALL_LIBS"
 echo
