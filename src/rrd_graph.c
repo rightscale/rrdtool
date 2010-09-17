@@ -175,7 +175,7 @@ gfx_color_t graph_col[] =   /* default colors */
 #endif
 
 #ifdef HAVE_LIBEV
-struct fetch_context{
+struct fetch_context{ // parallel fetch I/O watcher and friends.
     ev_io io;
     /*Write callback*/
     size_t bytes_written;
@@ -192,6 +192,11 @@ struct fetch_context{
     graph_desc_t *w_gdes; //watcher's gdes.
     int nan_fill; // bool. If true, rrdgraph will generate NaN in case fetch does not succeed
 };
+
+struct pfetch_timer{ // parallel fetch time watcher and friends.
+    ev_timer t_out;
+    int gdes_c;
+}; 
 
 int event_loop_timeout = 0;
 #endif
@@ -1022,6 +1027,8 @@ static void timeout_cb (EV_P_ ev_timer *w, int revents)
 }
 #endif
 
+/* Fixes the graphing step and verifies if the
+* specified variable existed */
 int fix_step(
     image_desc_t *im, int i)
 {
@@ -1056,43 +1063,6 @@ int fix_step(
     }
     return 0;
 }
-/*
-void fix_step(
-    image_desc_t *im)
-{
-    int i, ii;
-    printf("gdes_c %ld\n", im->gdes_c);
-    for(i = 0; i < (int) im->gdes_c; i++)
-    {
-        if (im->gdes[i].gf != GF_DEF)
-            continue;
-        printf("fixing with step %lu\n", im->gdes[i].ft_step);
-        im->gdes[i].data_first = 1;
-        if (im->gdes[i].ft_step < im->gdes[i].step) {
-            reduce_data(im->gdes[i].cf_reduce,
-                        im->gdes[i].ft_step,
-                        &im->gdes[i].start,
-                        &im->gdes[i].end,
-                        &im->gdes[i].step,
-                        &im->gdes[i].ds_cnt, &im->gdes[i].data);
-        } else {
-            printf("Not calling reduce\n");
-            im->gdes[i].step = im->gdes[i].ft_step;
-        }
-        // lets see if the required data source is really there
-        for (ii = 0; ii < (int) im->gdes[i].ds_cnt; ii++) {
-            if (strcmp(im->gdes[i].ds_namv[ii], im->gdes[i].ds_nam) == 0) {
-                im->gdes[i].ds = ii;
-            }
-        }
-        if (im->gdes[i].ds == -1) {
-            rrd_set_error("No DS called '%s' in '%s'",
-                          im->gdes[i].ds_nam, im->gdes[i].rrd);
-            im->gdes[i].all_fetched = 0;
-            generate_nan(&im->gdes[i], im->nan_fill, "Invalid DS name");
-        }
-    }
-}*/
 
 int perform_local_fetches(
     image_desc_t *im)
@@ -1144,7 +1114,7 @@ int perform_local_fetches(
         }
         if (!skip) {
             int status;
-            unsigned long ft_step = im->gdes[i].step;   /* ft_step will record what we got from fetch */
+            im->gdes[i].ft_step = im->gdes[i].step;   /* ft_step will record what we got from fetch */
 
             /* "daemon" may be NULL. ENV_RRDCACHED_ADDRESS is evaluated in that
              * case. If "daemon" holds the same value as in the previous
@@ -1160,8 +1130,8 @@ int perform_local_fetches(
                                 im->gdes[i].cf,
                                 &im->gdes[i].start,
                                 &im->gdes[i].end,
-                                &ft_step,
-                                //&im->gdes[i].ft_step,
+                                //&ft_step,
+                                &im->gdes[i].ft_step,
                                 &im->gdes[i].ds_cnt,
                                 &im->gdes[i].ds_namv,
                                 &im->gdes[i].data); 
@@ -1171,35 +1141,8 @@ int perform_local_fetches(
                 }else{
                     im->gdes[i].generate_nan = 0;
                 }
-            }   
-            im->gdes[i].data_first = 1;
-            if (ft_step < im->gdes[i].step) {
-            //if (im->gdes[i].ft_step < im->gdes[i].step) {
-                reduce_data(im->gdes[i].cf_reduce,
-                    ft_step,
-                    //im->gdes[i].ft_step,
-                    &im->gdes[i].start,
-                    &im->gdes[i].end,
-                    &im->gdes[i].step,
-                    &im->gdes[i].ds_cnt, &im->gdes[i].data);
-            } else {
-                im->gdes[i].step = ft_step;
-                //im->gdes[i].step = im->gdes[i].ft_step;
-            }
-        }
-        for (ii = 0; ii < (int) im->gdes[i].ds_cnt; ii++) {
-            if (strcmp(im->gdes[i].ds_namv[ii], im->gdes[i].ds_nam) == 0) {
-                im->gdes[i].ds = ii;
-            }
-        }
-        if (rrd_daemon == NULL)
-        {
-            if (im->gdes[i].ds == -1) {
-                rrd_set_error("No DS called '%s' in '%s'",
-                              im->gdes[i].ds_nam, im->gdes[i].rrd);
-                if(generate_nan(&im->gdes[i], im->nan_fill, "Invalid DS name") == -1)
-                    return -1;
-            }
+            } 
+            fix_step(im,i); 
         }
     }
     return 0;
@@ -1233,8 +1176,6 @@ int perform_remote_fetches(
     struct fetch_context* watcher = (struct fetch_context *) malloc(2*remotes*sizeof(struct fetch_context));
     assert(watcher);
     memset(watcher, 0, sizeof(struct fetch_context));
-    
-    ev_timer timeout_watcher;
     
     int *sd = (int *) malloc(remotes * sizeof(int));
     assert(sd);
@@ -1286,7 +1227,7 @@ int perform_remote_fetches(
         }
         if (!skip) {
             int status;
-            unsigned long ft_step = im->gdes[i].step;   /* ft_step will record what we got from fetch */
+            im->gdes[i].ft_step = im->gdes[i].step;   /* ft_step will record what we got from fetch */
 
             
             /* "daemon" may be NULL. ENV_RRDCACHED_ADDRESS is evaluated in that
@@ -1359,8 +1300,8 @@ int perform_remote_fetches(
                                 cf_to_string (im->gdes[i].cf),
                                 &im->gdes[i].start,
                                 &im->gdes[i].end,
-                                &ft_step,
-                                //&im->gdes[i].ft_step,
+                                //&ft_step,
+                                &im->gdes[i].ft_step,
                                 &im->gdes[i].ds_cnt,
                                 &im->gdes[i].ds_namv,
                                 &im->gdes[i].data);
@@ -1379,43 +1320,8 @@ int perform_remote_fetches(
                 }
                 rem_idx++;
             }
-            
-            
-            if(!im->parallel_fetch)
-            {
-                im->gdes[i].data_first = 1;
-                if (ft_step < im->gdes[i].step) {
-                //if (im->gdes[i].ft_step < im->gdes[i].step) {
-                    reduce_data(im->gdes[i].cf_reduce,
-                        ft_step,
-                        //im->gdes[i].ft_step,
-                        &im->gdes[i].start,
-                        &im->gdes[i].end,
-                        &im->gdes[i].step,
-                        &im->gdes[i].ds_cnt, &im->gdes[i].data);
-                } else {
-                    im->gdes[i].step = ft_step;
-                    //im->gdes[i].step = im->gdes[i].ft_step;
-                }
-            }
-        }
-        /* lets see if the required data source is really there */
-       
-        if(!im->parallel_fetch)
-        {
-            for (ii = 0; ii < (int) im->gdes[i].ds_cnt; ii++) {
-                if (strcmp(im->gdes[i].ds_namv[ii], im->gdes[i].ds_nam) == 0) {
-                    im->gdes[i].ds = ii;
-                } 
-            }
-            if (rrd_daemon != NULL)
-            {
-                if (im->gdes[i].ds == -1) {
-                    rrd_set_error("No DS called '%s' in '%s'",
-                                  im->gdes[i].ds_nam, im->gdes[i].rrd);
-                    if(generate_nan(&im->gdes[i], im->nan_fill, "Invalid DS name")==-1)
-                        return -1;
-                }
+            if(!im->parallel_fetch){
+                fix_step(im,i);
             }
         }
     }
@@ -1423,8 +1329,10 @@ int perform_remote_fetches(
 #ifdef HAVE_LIBEV
     if(im->parallel_fetch)
     {
-        ev_timer_init (&timeout_watcher, timeout_cb, im->pf_timeout, 0.);
-        ev_timer_start (loop, &timeout_watcher);
+        struct pfetch_timer* timeout_watcher = (struct pfetch_timer *) malloc(sizeof(struct pfetch_timer));
+        timeout_watcher->gdes_c = im->gdes_c;
+        ev_timer_init (&timeout_watcher->t_out, timeout_cb, im->pf_timeout, 0.);
+        ev_timer_start (loop, &timeout_watcher->t_out);
         ev_unref(loop);
         ev_loop (loop, 0);
     }
