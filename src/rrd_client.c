@@ -849,7 +849,6 @@ int rrdc_connect (const char *addr) /* {{{ */
     return 0;
 
   pthread_mutex_lock(&lock);
-  //TODO don't do this for parallel fetch!!!
   if(!parallel_fetch)
   { 
     if (sd >= 0 && sd_path != NULL && strcmp(addr, sd_path) == 0)

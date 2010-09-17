@@ -13,7 +13,10 @@
 #include <cairo-pdf.h>
 #include <cairo-svg.h>
 #include <cairo-ps.h>
+
+#ifdef HAVE_LIBEV
 #include <ev.h>
+#endif
 
 #include <pango/pangocairo.h>
 
@@ -351,6 +354,7 @@ int perform_remote_fetches(
 int       data_fetch(
     image_desc_t *);
 
+#ifdef HAVE_LIBEV
 void close_conn(
     struct ev_io w, 
     struct ev_loop * loop);
@@ -385,6 +389,7 @@ static void cb_func_r(
 static void timeout_cb (
     EV_P_ ev_timer *w, 
     int revents);
+#endif
 
 void fix_step(
     image_desc_t *im, int i);

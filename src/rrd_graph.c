@@ -174,6 +174,7 @@ gfx_color_t graph_col[] =   /* default colors */
 # define DPRINT(x)
 #endif
 
+#ifdef HAVE_LIBEV
 struct fetch_context{
     ev_io io;
     /*Write callback*/
@@ -193,6 +194,7 @@ struct fetch_context{
 };
 
 int event_loop_timeout = 0;
+#endif
 
 /* initialize with xtr(im,0); */
 int xtr(
@@ -858,6 +860,7 @@ int generate_nan(
     return 0;
 }
 
+#ifdef HAVE_LIBEV
 void close_conn(struct ev_io w, struct ev_loop * loop)
 {
     //ev_io_stop(loop, &w);
@@ -1017,7 +1020,7 @@ static void timeout_cb (EV_P_ ev_timer *w, int revents)
     event_loop_timeout = 1;
     ev_unloop (EV_A_ EVUNLOOP_ONE);
 }
-
+#endif
 
 void fix_step(
     image_desc_t *im, int i)
@@ -1222,6 +1225,7 @@ int perform_remote_fetches(
         return 0;
     }
 
+#ifdef HAVE_LIBEV
     char command_buffer[4096];
     size_t command_buffer_size;
     struct fetch_context* watcher = (struct fetch_context *) malloc(2*remotes*sizeof(struct fetch_context));
@@ -1233,11 +1237,10 @@ int perform_remote_fetches(
     int *sd = (int *) malloc(remotes * sizeof(int));
     assert(sd);
     memset(sd, 0, sizeof(int));
+    struct ev_loop *loop = ev_default_loop(0);
+#endif    
 
     int rem_idx = 0; // remote fetch index
-
-    struct ev_loop *loop = ev_default_loop(0);
-    
     set_conn_to(im->c_timeout);
 
     /* pull the data from the rrd files ... */
@@ -1281,7 +1284,6 @@ int perform_remote_fetches(
         }
         if (!skip) {
             int status;
-            int command_tot_length;
             unsigned long ft_step = im->gdes[i].step;   /* ft_step will record what we got from fetch */
 
             
@@ -1295,6 +1297,8 @@ int perform_remote_fetches(
              * was specified, (try to) use the local file directly. */
             if (rrd_daemon != NULL)
             {
+#ifdef HAVE_LIBEV
+                int command_tot_length;
                 if(im->parallel_fetch)
                 {
                     im->gdes[i].pf = 1;
@@ -1302,8 +1306,6 @@ int perform_remote_fetches(
                     sd[rem_idx] = rrdc_connect(rrd_daemon);
                     if(sd[rem_idx] >= 0)
                     {
-                        printf("Will init all the event loop stuff \n");
-                        //printf("generate_nan = %d\n", im->gdes[i].generate_nan);
                         // Compose the rrdtool fetch command
                         rrdc_command(im->gdes[i].rrd,
                                      cf_to_string (im->gdes[i].cf),
@@ -1345,7 +1347,8 @@ int perform_remote_fetches(
                         im->gdes[i].generate_nan = 1;
                     }
                 }
-                else
+#endif
+                if(!im->parallel_fetch)
                 {
                     status = rrdc_connect (rrd_daemon);
                     if (status==0)
@@ -1415,16 +1418,15 @@ int perform_remote_fetches(
         }
     }
 
-
+#ifdef HAVE_LIBEV
     if(im->parallel_fetch)
     {
-        printf("pf timeout %d\n", im->pf_timeout);
         ev_timer_init (&timeout_watcher, timeout_cb, im->pf_timeout, 0.);
-        //ev_timer_init (&timeout_watcher, timeout_cb, 7, 0.);
         ev_timer_start (loop, &timeout_watcher);
         ev_unref(loop);
         ev_loop (loop, 0);
     }
+#endif
     return 0;
 }
 
@@ -1439,8 +1441,10 @@ int data_fetch(
         return -1;
     if(perform_remote_fetches(im) == -1)
         return -1;
+#ifdef HAVE_LIBEV
     if(event_loop_timeout) 
         return -1;
+#endif
 
     if(im->parallel_fetch)
     {
@@ -1451,18 +1455,20 @@ int data_fetch(
                 //fprintf(stderr, "During data+fetch is %s\n", im->gdes[i].ds_namv[0]);
                 if(im->gdes[i].pf == 1 && im->gdes[i].generate_nan == 0)
                 {
+                    /*
                     printf("aaaaaaaaaa\n");
                     printf("File %s\n", im->gdes[i].rrd);
                     printf("Flag generate_nan = %d\n", im->gdes[i].generate_nan);
-                    printf("Flag pf = %d\n", im->gdes[i].pf);
+                    printf("Flag pf = %d\n", im->gdes[i].pf);*/
                     fix_step(im, i);
                 } 
                 if(im->gdes[i].pf == 1 && im->gdes[i].generate_nan == 1)
                 {
+                    /*
                     printf("bbbbbbbbbbbbbbb\n");
                     printf("File %s\n", im->gdes[i].rrd);
                     printf("Flag generate_nan = %d\n", im->gdes[i].generate_nan);
-                    printf("Flag pf = %d\n", im->gdes[i].pf);
+                    printf("Flag pf = %d\n", im->gdes[i].pf);*/
                     im->gdes[i].ft_step = im->gdes[i].step;
                     if(generate_nan(&im->gdes[i], im->nan_fill, "parallel") == -1)
                         return -1;
