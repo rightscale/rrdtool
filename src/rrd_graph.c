@@ -886,21 +886,6 @@ void bytes_to_soc(int written, size_t *tot_written, size_t *remaining)
     *remaining -= written;
 }
 
-void print_buf(char *buffer, size_t size)
-{
-    printf("##########################################################\n");
-    int i;
-    if(size == 0)
-        size= 1000;
-    for(i = 0; i< (int) size; i++)
-    {
-        //if(buffer[i] == '\0')
-            //break;
-        printf("%c",buffer[i]);
-    }
-    printf("***************************************************\n");
-}
-
 /*Copies the output read to the "result" data structure.*/
 void cp_to_result(struct fetch_context *w, int buffer_pos)
 {
@@ -955,10 +940,6 @@ void inspect_buf(struct fetch_context *w, long bytes, struct ev_loop *loop)
             }
             else
             {
-                /*
-                if(w->lines_read == 6){
-                    print_buf(w->read_buffer, 0);
-                }*/
                 cp_to_result(w, i);
                 total_line_bytes += w->cur_line_bytes; 
             }
@@ -1025,7 +1006,7 @@ static void cb_func_r(struct ev_loop *loop, ev_io *w_, int revents)
                           &w->w_gdes->ds_cnt,
                           &w->w_gdes->ds_namv,
                           &w->w_gdes->data);
-            fprintf(stderr,"After populate ds_namv is %s\n", w->w_gdes->ds_namv[0]);
+            //fprintf(stderr, "Aaaaaaa %s\n", w->w_gdes->ds_namv[0]);
             ev_io_stop(EV_A_ &w->io);
         }
     } else {
@@ -1041,7 +1022,7 @@ static void timeout_cb (EV_P_ ev_timer *w, int revents)
 }
 #endif
 
-void fix_step(
+int fix_step(
     image_desc_t *im, int i)
 {
     int ii;
@@ -1059,7 +1040,7 @@ void fix_step(
     
     // lets see if the required data source is really there
     for (ii = 0; ii < (int) im->gdes[i].ds_cnt; ii++) {
-        printf("Comparing nam ^^%s^^ and namv ^^%s^^ %d\n",im->gdes[i].ds_nam, im->gdes[i].ds_namv[ii], strcmp(im->gdes[i].ds_namv[ii], im->gdes[i].ds_nam));
+        //printf("Comparing nam ^^%s^^ and namv ^^%s^^ %d\n",im->gdes[i].ds_nam, im->gdes[i].ds_namv[ii], strcmp(im->gdes[i].ds_namv[ii], im->gdes[i].ds_nam));
         if (strcmp(im->gdes[i].ds_namv[ii], im->gdes[i].ds_nam) == 0) {
             im->gdes[i].ds = ii;
         }
@@ -1070,8 +1051,10 @@ void fix_step(
         } else {
             rrd_set_error("No DS called '%s' in '%s'",
                       im->gdes[i].ds_nam, im->gdes[i].rrd);
+            return -1;
         }
     }
+    return 0;
 }
 /*
 void fix_step(
@@ -1474,20 +1457,11 @@ int data_fetch(
                 //fprintf(stderr, "During data+fetch is %s\n", im->gdes[i].ds_namv[0]);
                 if(im->gdes[i].pf == 1 && im->gdes[i].generate_nan == 0)
                 {
-                    /*
-                    printf("aaaaaaaaaa\n");
-                    printf("File %s\n", im->gdes[i].rrd);
-                    printf("Flag generate_nan = %d\n", im->gdes[i].generate_nan);
-                    printf("Flag pf = %d\n", im->gdes[i].pf);*/
-                    fix_step(im, i);
+                    if(fix_step(im, i) == -1)
+                        return -1;
                 } 
                 if(im->gdes[i].pf == 1 && im->gdes[i].generate_nan == 1)
                 {
-                    /*
-                    printf("bbbbbbbbbbbbbbb\n");
-                    printf("File %s\n", im->gdes[i].rrd);
-                    printf("Flag generate_nan = %d\n", im->gdes[i].generate_nan);
-                    printf("Flag pf = %d\n", im->gdes[i].pf);*/
                     im->gdes[i].ft_step = im->gdes[i].step;
                     if(generate_nan(&im->gdes[i], im->nan_fill, "parallel") == -1)
                         return -1;

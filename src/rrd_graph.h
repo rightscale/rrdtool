@@ -391,7 +391,7 @@ static void timeout_cb (
     int revents);
 #endif
 
-void fix_step(
+int fix_step(
     image_desc_t *im, int i);
 /*void fix_step(
     image_desc_t *im);*/
