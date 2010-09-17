@@ -886,10 +886,25 @@ void bytes_to_soc(int written, size_t *tot_written, size_t *remaining)
     *remaining -= written;
 }
 
+void print_buf(char *buffer, size_t size)
+{
+    printf("##########################################################\n");
+    int i;
+    if(size == 0)
+        size= 1000;
+    for(i = 0; i< (int) size; i++)
+    {
+        //if(buffer[i] == '\0')
+            //break;
+        printf("%c",buffer[i]);
+    }
+    printf("***************************************************\n");
+}
+
 /*Copies the output read to the "result" data structure.*/
 void cp_to_result(struct fetch_context *w, int buffer_pos)
 {
-    int res_length = w->cur_line_bytes -1; //exclude "\n"
+    int res_length = w->cur_line_bytes;
     char* tmp_buffer = malloc(res_length + 1);
     assert(tmp_buffer);
     memcpy(tmp_buffer, 
@@ -940,6 +955,10 @@ void inspect_buf(struct fetch_context *w, long bytes, struct ev_loop *loop)
             }
             else
             {
+                /*
+                if(w->lines_read == 6){
+                    print_buf(w->read_buffer, 0);
+                }*/
                 cp_to_result(w, i);
                 total_line_bytes += w->cur_line_bytes; 
             }
