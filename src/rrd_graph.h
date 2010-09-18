@@ -396,8 +396,8 @@ int fix_step(
 /*void fix_step(
     image_desc_t *im);*/
 
-int       generate_nan(
-    graph_desc_t *, int, char *);
+void      generate_nan(
+    graph_desc_t *, char *);
 long      find_var(
     image_desc_t *,
     char *);

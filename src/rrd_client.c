@@ -815,24 +815,11 @@ int rrdc_parallel_connect_network (const char *addr_orig) /* {{{ */
       return -1;
     }
 
-
     status = connect (sd, ai_ptr->ai_addr, ai_ptr->ai_addrlen);
-    /*
-    if (status != 0)
-    {
-      status = errno;
-      close_connection();
-      continue;
-    }*/
-    /*
-    sh = fdopen (sd, "r+");
-    if (sh == NULL)
-    {
-      status = errno;
-      close_connection ();
-      continue;
-    }*/
-    // assert (status == 0);
+
+    if (status == -1 && errno != EINPROGRESS)
+      return -1;
+
     break;
   } /* for (ai_ptr) */
   return (sd);
