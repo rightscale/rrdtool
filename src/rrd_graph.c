@@ -855,15 +855,6 @@ void close_conn(struct ev_io w)
     close(w.fd);
 }
 
-/*RRDtool has a function for error reporting*/
-const char *pf_error(int fd, int err)
-{
-    printf("FD %d Error writing: %s errno %d\n", fd, strerror(err), err);
-    if(errno == ECONNREFUSED || err == EHOSTUNREACH || err == ETIMEDOUT) // If the connection is refused, times out or there's no route to the host, then generate nan if user defined so.
-        printf("Will generate nan, because cannot connect\n");
-    return 0;
-}
-
 /* calculates how many bytes have been written 
 *  to the socket and how many are there left */
 void bytes_to_soc(int written, size_t *tot_written, size_t *remaining)
@@ -948,7 +939,9 @@ static void cb_func_w (struct ev_loop *loop, ev_io *w_, int revents)
     written = write(w->io.fd, w->write_buffer+w->bytes_written, w->length_remaining);
     if (-1 == written) //if -1 => failed to write. Check why and close connection.
     {
-        pf_error(w->io.fd, errno);
+        w->w_gdes->generate_nan = 1;
+        strcpy(w->w_gdes->err_str, "Failed to write to socket");
+        rrd_set_error("Failed to write to socket");
         close_conn(w->io);
     }
     else
@@ -978,8 +971,8 @@ static void cb_func_r(struct ev_loop *loop, ev_io *w_, int revents)
     if(bytes == -1) //if -1 => failed to read. Check why and close connection.
     {
         w->w_gdes->generate_nan = 1;
-        strcpy(w->w_gdes->err_str, "Could not read from socket");
-        pf_error(w->io.fd, errno);
+        strcpy(w->w_gdes->err_str, "Failed to read from socket");
+        rrd_set_error("Failed to read from socket");
         close_conn(w->io);
     }
     
@@ -1005,7 +998,6 @@ static void cb_func_r(struct ev_loop *loop, ev_io *w_, int revents)
 
 static void timeout_cb (EV_P_ ev_timer *w, int revents)
 {
-    puts("timeout");
     event_loop_timeout = 1;
     ev_unloop (EV_A_ EVUNLOOP_ONE);
 }
@@ -1186,6 +1178,7 @@ int perform_parallel_fetch(
 
     int rem_idx = 0; // remote fetch index
     set_conn_to(im->c_timeout);
+    set_nan_fill(im->nan_fill);
 
     /* pull the data from the rrd files ... */
     for (i = 0; i < (int) im->gdes_c; i++) {
@@ -1273,6 +1266,7 @@ int perform_serialized_fetch(
         return 0;
 
     set_conn_to(im->c_timeout);
+    set_nan_fill(im->nan_fill);
     /* pull the data from the rrd files ... */
     for (i = 0; i < (int) im->gdes_c; i++) {
         const char *rrd_daemon;
@@ -1355,16 +1349,19 @@ int data_fetch(
     if(perform_local_fetches(im) == -1)
         return -1;
 #ifdef HAVE_LIBEV 
-    if(!im->nan_fill && event_loop_timeout)//TODO test it!!
-        return -1;
-    else {
-        for(i = 0; i < (int) im->gdes_c; i++){
-            if (im->gdes[i].gf != GF_DEF)
-                continue;
-            if((im->gdes[i].daemon != NULL || im->daemon_addr != NULL)
-            && im->gdes[i].generate_nan == 0
-            && im->gdes[i].data == NULL){
-                im->gdes[i].generate_nan = 1;
+    if(event_loop_timeout) {//TODO test it!!
+        if(!im->nan_fill)
+            return -1;
+        else {
+            for(i = 0; i < (int) im->gdes_c; i++){
+                if (im->gdes[i].gf != GF_DEF)
+                    continue;
+                if((im->gdes[i].daemon != NULL || im->daemon_addr != NULL)
+                && im->gdes[i].generate_nan == 0
+                && im->gdes[i].data == NULL){
+                    im->gdes[i].generate_nan = 1;
+                    strcpy(im->gdes[i].err_str, "Parallel fetch timed out"); 
+                }
             }
         }
     }

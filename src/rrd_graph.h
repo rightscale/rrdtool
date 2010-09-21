@@ -383,9 +383,6 @@ int perform_parallel_fetch(
 void close_conn(
     struct ev_io w);
 
-const char *pf_error(
-    int fd, int err);
-
 void bytes_to_soc(
     int written, 
     size_t* tot_written, 

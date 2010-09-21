@@ -53,6 +53,7 @@ static FILE *sh = NULL;
 static char *sd_path = NULL; /* cache the path for sd */
 static int conn_timeout; /* User specified timeout */
 static int parallel_fetch; /* bool. Indicates if user specified parallel fetch */
+static int nan_fill; /*bool. Indicates if user specified nan-fill-unavailable*/
 
 /* get_path: Return a path name appropriate to be sent to the daemon.
  *
@@ -367,7 +368,6 @@ int response_read (rrdc_response_t **ret_response) /* {{{ */
   ret->lines_num = 0;
 
   buffer_ptr = fgets (buffer, sizeof (buffer), sh);
-  // TODO remove.mariya puts(buffer);
   if (buffer_ptr == NULL) {
     close_connection();
     return (-3);
@@ -405,16 +405,7 @@ int response_read (rrdc_response_t **ret_response) /* {{{ */
   for (i = 0; i < ret->lines_num; i++)
   {
     buffer_ptr = fgets (buffer, sizeof (buffer), sh);
-    // TODO remove.mariya puts(buffer);
-    /* 
-    if (buffer_ptr == NULL)
-    {
-      printf("Error? %d\n", ferror(sh));
-      perror("An error occurred");
-      response_free (ret);
-      close_connection();
-      return (-6);
-    }*/
+  
     chomp (buffer);
 
     ret->lines[i] = strdup (buffer);
@@ -605,11 +596,15 @@ static int rrdc_connect_network (const char *addr_orig) /* {{{ */
     rrd_set_error ("failed to resolve address `%s' (port %s): %s",
         addr, port == NULL ? RRDCACHED_DEFAULT_PORT : port,
         gai_strerror (status));
-    return (-1);
+    if(!nan_fill)
+        return (-1);
   }
+
 
   if(conn_timeout > 0)
   {
+    if(ai_res == NULL) // getaddrinfo failed to resolve the host.. return -1 and move on.
+        status = -1;
     for (ai_ptr = ai_res; ai_ptr != NULL; ai_ptr = ai_ptr->ai_next)
     {
       // Create sockets
@@ -1013,15 +1008,12 @@ int rrdc_flush (const char *filename) /* {{{ */
 int rrdc_command(const char *filename, const char *cf, time_t *ret_start, time_t *ret_end, char *command_buffer, size_t *buffer_size_)
 {
   char buffer[4096];
-  //char *buffer;//??
   char *buffer_ptr;
   size_t buffer_free;
   size_t buffer_size;
   int status;
   char path_buffer[PATH_MAX];
   const char *path_ptr;
-
-  //buffer_size = *buffer_size_;
 
   /* Send request {{{ */
   memset (buffer, 0, sizeof (buffer));
@@ -1238,7 +1230,7 @@ int rrdc_fetch (const char *filename, /* {{{ */
   if ((filename == NULL) || (cf == NULL))
     return (-1);
 
-  rrdc_command(filename, cf, ret_start, ret_end, &buffer, &buffer_size);
+  rrdc_command(filename, cf, ret_start, ret_end, buffer, &buffer_size);
   res = NULL;
   status = request (buffer, buffer_size, &res);
   if (status != 0)
@@ -1271,6 +1263,13 @@ int set_conn_to( /*Sets the connect timeout as user defined*/
     int c_timeout)
 {
   conn_timeout = c_timeout;
+  return 0;
+}
+
+int set_nan_fill( /*Sets the connect timeout as user defined*/ 
+    int n_fill)
+{
+  nan_fill = n_fill;
   return 0;
 }
 

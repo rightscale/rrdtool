@@ -112,6 +112,8 @@ int populate_gdes(rrdc_response_t *res,
 #endif
 int set_conn_to( 
     int c_timeout);
+int set_nan_fill( 
+    int n_fill);
 int set_parallel_fetch( 
     int p_fetch);
 FILE* set_stream( 
