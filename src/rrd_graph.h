@@ -181,6 +181,7 @@ typedef struct graph_desc_t {
     int       generate_nan; /* boolean. Indicates if nan series had been generated for this gdes */
     //int       all_fetched; // bool. 0 if there's more to be read from the socket and 1 if reading done.
 
+    char err_str[4096]; // Holds error string for parallel fetch failure.
 
     /* SHIFT implementation */
     int       shidx;    /* gdes reference for offset (-1 --> constant) */
@@ -192,7 +193,6 @@ typedef struct graph_desc_t {
     time_t    start_orig, end_orig; /* timestaps for first and last data element */
     unsigned long step; /* time between samples */
     unsigned long ft_step; /* time between samples. Fetch adjusted step */
-    int pf; //bool. Indicates that the data for this fd had been fetched in a parallel fashion.
     unsigned long step_orig;    /* time between samples */
     unsigned long ds_cnt;   /* how many data sources are there in the fetch */
     long      data_first;   /* first pointer to this data */
@@ -345,6 +345,17 @@ void      reduce_data(
     unsigned long *,
     rrd_value_t **);
 
+int count_remotes(
+    image_desc_t *im);
+
+#ifdef HAVE_LIBEV
+int perform_parallel_fetch(
+    image_desc_t *im);
+#endif
+
+int perform_serialized_fetch(
+    image_desc_t *im);
+
 int    perform_local_fetches(
     image_desc_t *im);
 
@@ -393,8 +404,9 @@ static void timeout_cb (
 
 int fix_step(
     image_desc_t *im, int i);
-/*void fix_step(
-    image_desc_t *im);*/
+
+int use_previously_fetched(
+    image_desc_t *im, int i);
 
 void      generate_nan(
     graph_desc_t *, char *);
