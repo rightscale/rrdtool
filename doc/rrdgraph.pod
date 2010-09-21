@@ -509,6 +509,28 @@ specified in seconds.
 If specified, rrdgraph will generate NaN data series in case standard data 
 fetch fails.
 
+=head2 Parallel fetch
+
+This set of options enables fetching from L<rrdcached> daemon(s) in a parallel 
+fashion. If parallel fetch options are indicated, rrdgraph opens as many 
+concurrent connections, as the number of daemons that the user specified, and 
+fetches data from them simultaneously.
+
+Note: In order to use parallel fetch, one must compile rrdtool after having the
+I<libev> library installed.
+
+[B<--parallel-fetch>]
+
+If specified, rrdgraph will fetch remote data in a parallel fashion.
+
+[B<--pf-timeout> I<value>]
+
+There is overall timeout for parallel fetch of data. This means, 
+after certain number of seconds, all the connections will be closed 
+and rrdgraph will attempt to draw a graph based on the fetched data.
+The default timeout is 20 seconds. By using the B<--pf-timeout> 
+option, one can specify another value.
+
 =head2 Data and variables
 
 B<DEF:>I<vname>B<=>I<rrdfile>B<:>I<ds-name>B<:>I<CF>[B<:step=>I<step>][B<:start=>I<time>][B<:end=>I<time>]

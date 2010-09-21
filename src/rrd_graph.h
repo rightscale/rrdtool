@@ -23,6 +23,7 @@
 
 #include "rrd_tool.h"
 #include "rrd_rpncalc.h"
+#include "rrd_client.h"
 
 #ifdef WIN32
 #  include <windows.h>
@@ -306,6 +307,33 @@ typedef struct image_desc_t {
     rrd_info_t *grinfo_current; /* pointing to current entry */
 } image_desc_t;
 
+/*Parallel fetch components*/
+#ifdef HAVE_LIBEV
+struct fetch_context{ // parallel fetch I/O watcher and friends.
+    ev_io io;
+    /*Write callback*/
+    size_t bytes_written;
+    size_t length_remaining;
+    size_t command_size;
+    char *w_buf_ptr;
+    char write_buffer[4096];
+    /*Read callback*/
+    size_t bytes_read;
+    size_t cur_line_bytes;
+    size_t lines_read; // number of new lines
+    rrdc_response_t *res; 
+    char read_buffer[4096];
+    graph_desc_t *w_gdes; //graph descriptor structure.
+    int nan_fill; // bool. If true, rrdgraph will generate NaN in case fetch does not succeed
+};
+
+struct pfetch_timer{ // parallel fetch time watcher and friends.
+    ev_timer t_out;
+    int gdes_c;
+}; 
+#endif
+
+
 /* Prototypes */
 int       xtr(
     image_desc_t *,
@@ -351,6 +379,25 @@ int count_remotes(
 #ifdef HAVE_LIBEV
 int perform_parallel_fetch(
     image_desc_t *im);
+
+void close_conn(
+    struct ev_io w);
+
+const char *pf_error(
+    int fd, int err);
+
+void bytes_to_soc(
+    int written, 
+    size_t* tot_written, 
+    size_t* remaining);
+
+void cp_to_result(
+    struct fetch_context *w, 
+    int buffer_pos);
+
+void inspect_buf(
+    struct fetch_context *w, 
+    long bytes);
 #endif
 
 int perform_serialized_fetch(
@@ -364,43 +411,6 @@ int perform_remote_fetches(
 
 int       data_fetch(
     image_desc_t *);
-
-#ifdef HAVE_LIBEV
-void close_conn(
-    struct ev_io w, 
-    struct ev_loop * loop);
-
-const char *pf_error(
-    int fd, int err);
-
-void bytes_to_soc(
-    int written, 
-    size_t* tot_written, 
-    size_t* remaining);
-
-/*
-void cp_to_result(
-    struct fetch_context *w, 
-    int buffer_pos);
-
-void inspect_buf(
-    struct fetch_context *w, 
-    long bytes, 
-    struct ev_loop *loop);
-*/
-
-static void      cb_func_w(
-    struct ev_loop *loop, 
-    ev_io *w, int revents);
-
-static void cb_func_r(
-    struct ev_loop *loop, 
-    ev_io *w, int revents);
-
-static void timeout_cb (
-    EV_P_ ev_timer *w, 
-    int revents);
-#endif
 
 int fix_step(
     image_desc_t *im, int i);

@@ -34,12 +34,9 @@
 #endif
 
 #include "rrd_graph.h"
-#include "rrd_client.h"
 #include <assert.h>
 
 /* some constant definitions */
-
-
 
 #ifndef RRD_DEFAULT_FONT
 /* there is special code later to pick Cour.ttf when running on windows */
@@ -175,28 +172,17 @@ gfx_color_t graph_col[] =   /* default colors */
 #endif
 
 #ifdef HAVE_LIBEV
-struct fetch_context{ // parallel fetch I/O watcher and friends.
-    ev_io io;
-    /*Write callback*/
-    size_t bytes_written;
-    size_t length_remaining;
-    size_t command_size;
-    char *w_buf_ptr;
-    char write_buffer[4096];
-    /*Read callback*/
-    size_t bytes_read;
-    size_t cur_line_bytes;
-    size_t lines_read; // number of new lines
-    rrdc_response_t *res; 
-    char read_buffer[4096];
-    graph_desc_t *w_gdes; //graph descriptor structure.
-    int nan_fill; // bool. If true, rrdgraph will generate NaN in case fetch does not succeed
-};
+static void      cb_func_w(
+    struct ev_loop *loop, 
+    ev_io *w, int revents);
 
-struct pfetch_timer{ // parallel fetch time watcher and friends.
-    ev_timer t_out;
-    int gdes_c;
-}; 
+static void cb_func_r(
+    struct ev_loop *loop, 
+    ev_io *w, int revents);
+
+static void timeout_cb (
+    EV_P_ ev_timer *w, 
+    int revents);
 
 int event_loop_timeout = 0;
 #endif
@@ -863,7 +849,7 @@ void generate_nan(
 }
 
 #ifdef HAVE_LIBEV
-void close_conn(struct ev_io w, struct ev_loop * loop)
+void close_conn(struct ev_io w)
 {
     //ev_io_stop(loop, &w);
     close(w.fd);
@@ -902,7 +888,7 @@ void cp_to_result(struct fetch_context *w, int buffer_pos)
 }
 
 /*Inspects the read buffer. Checks if reading is DONE.*/
-void inspect_buf(struct fetch_context *w, long bytes, struct ev_loop *loop)
+void inspect_buf(struct fetch_context *w, long bytes)
 {
     size_t i;
     size_t total_line_bytes = 0;
@@ -926,14 +912,14 @@ void inspect_buf(struct fetch_context *w, long bytes, struct ev_loop *loop)
                 {
                     w->w_gdes->generate_nan = 1;
                     strcpy(w->w_gdes->err_str, "Could not find remote file");
-                    close_conn(w->io, loop);
+                    close_conn(w->io);
                     return;
                 }
                 w->res->lines_num = (size_t) w->res->status;
                 /* if there is no, data stop and return */
                 if(0 == w->res->lines_num) 
                 {
-                    close_conn(w->io, loop);
+                    close_conn(w->io);
                     return;
                 }
                 w->res->lines = (char **) malloc (sizeof (char *) * w->res->lines_num);
@@ -963,7 +949,7 @@ static void cb_func_w (struct ev_loop *loop, ev_io *w_, int revents)
     if (-1 == written) //if -1 => failed to write. Check why and close connection.
     {
         pf_error(w->io.fd, errno);
-        close_conn(w->io, loop);
+        close_conn(w->io);
     }
     else
     {
@@ -994,10 +980,10 @@ static void cb_func_r(struct ev_loop *loop, ev_io *w_, int revents)
         w->w_gdes->generate_nan = 1;
         strcpy(w->w_gdes->err_str, "Could not read from socket");
         pf_error(w->io.fd, errno);
-        close_conn(w->io, loop);
+        close_conn(w->io);
     }
     
-    inspect_buf(w, bytes, loop);    
+    inspect_buf(w, bytes);    
       
     if(!w->w_gdes->generate_nan)
     {
@@ -1240,7 +1226,7 @@ int perform_parallel_fetch(
                              cf_to_string (im->gdes[i].cf),
                              &im->gdes[i].start,
                              &im->gdes[i].end, 
-                             &command_buffer, 
+                             command_buffer, 
                              &command_buffer_size);
                 command_tot_length = sizeof(command_buffer);
                 /*Init write callback*/
@@ -1368,11 +1354,13 @@ int data_fetch(
         return -1;
     if(perform_local_fetches(im) == -1)
         return -1;
-#ifdef HAVE_LIBEV //TODO test it!!
-    if(!im->nan_fill && event_loop_timeout)
+#ifdef HAVE_LIBEV 
+    if(!im->nan_fill && event_loop_timeout)//TODO test it!!
         return -1;
     else {
         for(i = 0; i < (int) im->gdes_c; i++){
+            if (im->gdes[i].gf != GF_DEF)
+                continue;
             if((im->gdes[i].daemon != NULL || im->daemon_addr != NULL)
             && im->gdes[i].generate_nan == 0
             && im->gdes[i].data == NULL){

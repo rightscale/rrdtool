@@ -525,7 +525,7 @@ AC_ARG_ENABLE(libev,AS_HELP_STRING([--disable-libev],[do not build in support fo
     [AC_LANG_PROGRAM([[#include <ev.h>]], 
                      [[ev_timer timeout_watcher;]]
                     )   
-    ],[AC_DEFINE(HAVE_LIBEVENT,[1],[have got libev installed])
+    ],[AC_DEFINE(HAVE_LIBEV,[1],[have got libev installed])
        AC_MSG_RESULT([yes])
        have_libev=yes
     ],[LIBS=$XXX
