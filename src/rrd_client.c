@@ -596,8 +596,12 @@ static int rrdc_connect_network (const char *addr_orig) /* {{{ */
     rrd_set_error ("failed to resolve address `%s' (port %s): %s",
         addr, port == NULL ? RRDCACHED_DEFAULT_PORT : port,
         gai_strerror (status));
-    if(!nan_fill)
+    if(!nan_fill){
+        rrd_set_error ("failed to resolve address `%s' (port %s): %s",
+            addr, port == NULL ? RRDCACHED_DEFAULT_PORT : port,
+            gai_strerror (status));
         return (-1);
+    }
   }
 
 

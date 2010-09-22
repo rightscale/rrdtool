@@ -376,27 +376,6 @@ void      reduce_data(
 int count_remotes(
     image_desc_t *im);
 
-#ifdef HAVE_LIBEV
-int perform_parallel_fetch(
-    image_desc_t *im);
-
-void close_conn(
-    struct ev_io w);
-
-void bytes_to_soc(
-    int written, 
-    size_t* tot_written, 
-    size_t* remaining);
-
-void cp_to_result(
-    struct fetch_context *w, 
-    int buffer_pos);
-
-void inspect_buf(
-    struct fetch_context *w, 
-    long bytes);
-#endif
-
 int perform_serialized_fetch(
     image_desc_t *im);
 

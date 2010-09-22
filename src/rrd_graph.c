@@ -172,17 +172,42 @@ gfx_color_t graph_col[] =   /* default colors */
 #endif
 
 #ifdef HAVE_LIBEV
+/*Do not change. This is standard 
+*format for libev callback functions.*/
 static void      cb_func_w(
     struct ev_loop *loop, 
     ev_io *w, int revents);
 
+/*Do not change. This is standard 
+*format for libev callback functions.*/
 static void cb_func_r(
     struct ev_loop *loop, 
     ev_io *w, int revents);
 
+/*Do not change. This is standard 
+*format for libev callback functions.*/
 static void timeout_cb (
     EV_P_ ev_timer *w, 
     int revents);
+
+int perform_parallel_fetch(
+    image_desc_t *im);
+
+void close_conn(
+    struct ev_io w);
+
+void bytes_to_soc(
+    int written, 
+    size_t* tot_written, 
+    size_t* remaining);
+
+void cp_to_result(
+    struct fetch_context *w, 
+    int buffer_pos);
+
+void inspect_buf(
+    struct fetch_context *w, 
+    long bytes);
 
 static int event_loop_timeout = 0;
 #endif
@@ -821,7 +846,7 @@ void reduce_data(
 void generate_nan(
     graph_desc_t *gdes, char *err_str)
 {
-    fprintf(stderr,"############### GENERATING NaN ################\nReason: %s\n", err_str);
+    fprintf(stderr,"GENERATING NaN: %s\n", err_str);
     gdes->ds_cnt = 1;
     
     gdes->ds_namv = calloc(gdes->ds_cnt, sizeof(char*));
@@ -849,7 +874,6 @@ void generate_nan(
 #ifdef HAVE_LIBEV
 void close_conn(struct ev_io w)
 {
-    //ev_io_stop(loop, &w);
     close(w.fd);
 }
 
@@ -901,6 +925,7 @@ void inspect_buf(struct fetch_context *w, long bytes)
                 {
                     w->w_gdes->generate_nan = 1;
                     strcpy(w->w_gdes->err_str, "Could not find remote file");
+                    rrd_set_error("Could not find remote file %s",w->w_gdes->rrd);
                     close_conn(w->io);
                     return;
                 }
@@ -929,6 +954,8 @@ void inspect_buf(struct fetch_context *w, long bytes)
     w->bytes_read = bytes_remaining;
 }
 
+/*Do not change. This is standard 
+*format for libev callback functions.*/
 static void cb_func_w (struct ev_loop *loop, ev_io *w_, int revents)
 {
     struct fetch_context *w = (struct fetch_context *)w_;
@@ -954,6 +981,8 @@ static void cb_func_w (struct ev_loop *loop, ev_io *w_, int revents)
 }
 
 
+/*Do not change. This is standard 
+*format for libev callback functions.*/
 static void cb_func_r(struct ev_loop *loop, ev_io *w_, int revents)
 {
     struct fetch_context *w = (struct fetch_context *)w_;
@@ -994,10 +1023,139 @@ static void cb_func_r(struct ev_loop *loop, ev_io *w_, int revents)
     }
 }
 
+/*Do not change. This is standard 
+*format for libev callback functions.*/
 static void timeout_cb (EV_P_ ev_timer *w, int revents)
 {
     event_loop_timeout = 1;
     ev_unloop (EV_A_ EVUNLOOP_ONE);
+}
+
+int perform_parallel_fetch(
+    image_desc_t *im)
+{
+    int       i;
+    int remotes = count_remotes(im);
+ 
+    if(remotes == 0)
+        return 0;
+
+    char command_buffer[4096];
+    size_t command_buffer_size;
+    /*Event I/O watchers - two for each remote 
+    * fetch - one for reading and one for writing*/
+    size_t watcher_memsize = 2 * remotes * sizeof(struct fetch_context);
+    struct fetch_context watcher[2 * remotes];
+    
+    memset(&watcher, 0, watcher_memsize);
+    
+    /*Allocate memory for socket descriptors*/
+    size_t sd_memsize = remotes * sizeof(int);
+    int sd[remotes];
+    memset(&sd, 0, sd_memsize);
+
+    struct ev_loop *loop = ev_default_loop(0);
+    
+    /*Init event loop timer*/
+    struct pfetch_timer timeout_watcher;
+    memset(&timeout_watcher, 0, sizeof(struct pfetch_timer));
+
+    int rem_idx = 0; // remote fetch index
+    set_conn_to(im->c_timeout);
+    set_nan_fill(im->nan_fill);
+
+    /* pull the data from the rrd files ... */
+    for (i = 0; i < (int) im->gdes_c; i++) {
+        /* only GF_DEF elements fetch data */
+        if (im->gdes[i].gf != GF_DEF)
+            continue;
+
+        int skip = 0;
+        const char *rrd_daemon;
+
+        if (im->gdes[i].daemon[0] != 0){
+            rrd_daemon = im->gdes[i].daemon;
+        }else{
+            rrd_daemon = im->daemon_addr;
+        }
+        /* do we have it already ? */
+        skip = use_previously_fetched(im, i);
+
+        if (!skip) {
+            im->gdes[i].ft_step = im->gdes[i].step;   /* ft_step will record what we got from fetch */
+
+            if (rrd_daemon != NULL)
+            {
+                int command_tot_length;
+                set_parallel_fetch(im->parallel_fetch);
+                sd[rem_idx] = rrdc_connect(rrd_daemon);
+                if(sd[rem_idx] == -1) {
+                    if(im->nan_fill){
+                        im->gdes[i].generate_nan = 1;
+                        strcpy(im->gdes[i].err_str, "Could not connect");
+                        rrd_set_error("Could not connect to %s", rrd_daemon);
+                        continue;
+                    } else {
+                        return -1;
+                    }
+                }
+
+                /* Compose the rrdtool fetch command */
+                rrdc_command(im->gdes[i].rrd,
+                             cf_to_string (im->gdes[i].cf),
+                             &im->gdes[i].start,
+                             &im->gdes[i].end, 
+                             command_buffer, 
+                             &command_buffer_size);
+                command_tot_length = sizeof(command_buffer);
+                /*Init write callback*/
+                watcher[2*rem_idx].w_gdes = &im->gdes[i]; 
+                watcher[2*rem_idx].io.fd = sd[rem_idx];
+                watcher[2*rem_idx].command_size = command_tot_length;
+                strcpy(watcher[2*rem_idx].write_buffer, command_buffer);
+                watcher[2*rem_idx].length_remaining = sizeof(command_buffer); 
+                watcher[2*rem_idx].w_buf_ptr = &command_buffer[0];
+                watcher[2*rem_idx].nan_fill = im->nan_fill; 
+                
+                /*Init read callback*/
+                watcher[2*rem_idx + 1].w_gdes = &im->gdes[i]; 
+                watcher[2*rem_idx + 1].io.fd = sd[rem_idx];
+                watcher[2*rem_idx + 1].nan_fill = im->nan_fill; 
+                
+                ev_io_init(&watcher[2*rem_idx].io, cb_func_w, sd[rem_idx], EV_WRITE);
+                ev_io_start(loop, &watcher[2*rem_idx].io);
+                
+                ev_io_init(&watcher[2*rem_idx+1].io, cb_func_r, sd[rem_idx], EV_READ);
+                ev_io_start(loop, &watcher[2*rem_idx+1].io);
+            } /*if(rrd_daemon...)*/ 
+        } /*if(!skip)*/
+        rem_idx++;
+    } /*for(i=0; i < (int) im->gdes_c; i++)*/
+
+    timeout_watcher.gdes_c = im->gdes_c;
+    ev_timer_init (&timeout_watcher.t_out, timeout_cb, im->pf_timeout, 0.);
+    ev_timer_start (loop, &timeout_watcher.t_out);
+    ev_unref(loop);
+    ev_loop (loop, 0);
+
+    if(event_loop_timeout) {
+        if(!im->nan_fill)
+            return -1;
+        else {
+            for(i = 0; i < (int) im->gdes_c; i++){
+                if (im->gdes[i].gf != GF_DEF)
+                    continue;
+                if((im->gdes[i].daemon[0] != 0 || im->daemon_addr != NULL)
+                && im->gdes[i].generate_nan == 0
+                && im->gdes[i].data == NULL){
+                    im->gdes[i].generate_nan = 1;
+                    strcpy(im->gdes[i].err_str, "Parallel fetch timed out"); 
+                    rrd_set_error("Parallel fetch timed out");
+                }
+            }
+        }
+    }
+    return 0;
 }
 #endif
 
@@ -1030,6 +1188,7 @@ int fix_step(
             if(im->gdes[i].generate_nan == 0){
                 im->gdes[i].generate_nan = 1;
                 strcpy(im->gdes[i].err_str, "Invalid DS");
+                rrd_set_error("Invalid ds: no %s in file %s", im->gdes[i].ds_nam, im->gdes[i].rrd);
             }
         } else {
             rrd_set_error("No DS called '%s' in '%s'",
@@ -1124,6 +1283,7 @@ int perform_local_fetches(
                 if(im->nan_fill) {
                     im->gdes[i].generate_nan = 1;
                     strcpy(im->gdes[i].err_str, "Could not find local file");
+                    rrd_set_error("Could not find file %s", im->gdes[i].rrd);
                 }else{
                     return -1;
                 }
@@ -1144,133 +1304,6 @@ int count_remotes(
     }
     return remotes;
 }
-
-#ifdef HAVE_LIBEV
-int perform_parallel_fetch(
-    image_desc_t *im)
-{
-    int       i;
-    int remotes = count_remotes(im);
- 
-    if(remotes == 0)
-        return 0;
-
-    char command_buffer[4096];
-    size_t command_buffer_size;
-    /*Event I/O watchers - two for each remote 
-    * fetch - one for reading and one for writing*/
-    size_t watcher_memsize = 2 * remotes * sizeof(struct fetch_context);
-    struct fetch_context watcher[2 * remotes];
-    
-    memset(&watcher, 0, watcher_memsize);
-    
-    /*Allocate memory for socket descriptors*/
-    size_t sd_memsize = remotes * sizeof(int);
-    int sd[remotes];
-    memset(&sd, 0, sd_memsize);
-
-    struct ev_loop *loop = ev_default_loop(0);
-    
-    /*Init event loop timer*/
-    struct pfetch_timer timeout_watcher;
-    memset(&timeout_watcher, 0, sizeof(struct pfetch_timer));
-
-    int rem_idx = 0; // remote fetch index
-    set_conn_to(im->c_timeout);
-    set_nan_fill(im->nan_fill);
-
-    /* pull the data from the rrd files ... */
-    for (i = 0; i < (int) im->gdes_c; i++) {
-        /* only GF_DEF elements fetch data */
-        if (im->gdes[i].gf != GF_DEF)
-            continue;
-
-        int skip = 0;
-        const char *rrd_daemon;
-
-        if (im->gdes[i].daemon[0] != 0){
-            rrd_daemon = im->gdes[i].daemon;
-        }else{
-            rrd_daemon = im->daemon_addr;
-        }
-        /* do we have it already ? */
-        skip = use_previously_fetched(im, i);
-
-        if (!skip) {
-            im->gdes[i].ft_step = im->gdes[i].step;   /* ft_step will record what we got from fetch */
-
-            if (rrd_daemon != NULL)
-            {
-                int command_tot_length;
-                set_parallel_fetch(im->parallel_fetch);
-                sd[rem_idx] = rrdc_connect(rrd_daemon);
-                if(sd[rem_idx] == -1) {
-                    if(im->nan_fill){
-                        im->gdes[i].generate_nan = 1;
-                        strcpy(im->gdes[i].err_str, "Could not connect");
-                        continue;
-                    } else {
-                        return -1;
-                    }
-                }
-
-                /* Compose the rrdtool fetch command */
-                rrdc_command(im->gdes[i].rrd,
-                             cf_to_string (im->gdes[i].cf),
-                             &im->gdes[i].start,
-                             &im->gdes[i].end, 
-                             command_buffer, 
-                             &command_buffer_size);
-                command_tot_length = sizeof(command_buffer);
-                /*Init write callback*/
-                watcher[2*rem_idx].w_gdes = &im->gdes[i]; 
-                watcher[2*rem_idx].io.fd = sd[rem_idx];
-                watcher[2*rem_idx].command_size = command_tot_length;
-                strcpy(watcher[2*rem_idx].write_buffer, command_buffer);
-                watcher[2*rem_idx].length_remaining = sizeof(command_buffer); 
-                watcher[2*rem_idx].w_buf_ptr = &command_buffer[0];
-                watcher[2*rem_idx].nan_fill = im->nan_fill; 
-                
-                /*Init read callback*/
-                watcher[2*rem_idx + 1].w_gdes = &im->gdes[i]; 
-                watcher[2*rem_idx + 1].io.fd = sd[rem_idx];
-                watcher[2*rem_idx + 1].nan_fill = im->nan_fill; 
-                
-                ev_io_init(&watcher[2*rem_idx].io, cb_func_w, sd[rem_idx], EV_WRITE);
-                ev_io_start(loop, &watcher[2*rem_idx].io);
-                
-                ev_io_init(&watcher[2*rem_idx+1].io, cb_func_r, sd[rem_idx], EV_READ);
-                ev_io_start(loop, &watcher[2*rem_idx+1].io);
-            } /*if(rrd_daemon...)*/ 
-        } /*if(!skip)*/
-        rem_idx++;
-    } /*for(i=0; i < (int) im->gdes_c; i++)*/
-
-    timeout_watcher.gdes_c = im->gdes_c;
-    ev_timer_init (&timeout_watcher.t_out, timeout_cb, im->pf_timeout, 0.);
-    ev_timer_start (loop, &timeout_watcher.t_out);
-    ev_unref(loop);
-    ev_loop (loop, 0);
-
-    if(event_loop_timeout) {
-        if(!im->nan_fill)
-            return -1;
-        else {
-            for(i = 0; i < (int) im->gdes_c; i++){
-                if (im->gdes[i].gf != GF_DEF)
-                    continue;
-                if((im->gdes[i].daemon != NULL || im->daemon_addr != NULL)
-                && im->gdes[i].generate_nan == 0
-                && im->gdes[i].data == NULL){
-                    im->gdes[i].generate_nan = 1;
-                    strcpy(im->gdes[i].err_str, "Parallel fetch timed out"); 
-                }
-            }
-        }
-    }
-    return 0;
-}
-#endif
 
 int perform_serialized_fetch(
     image_desc_t *im)
@@ -1320,6 +1353,7 @@ int perform_serialized_fetch(
                         if(im->nan_fill) {
                             im->gdes[i].generate_nan = 1;
                             strcpy(im->gdes[i].err_str, "Could not find remote file");
+                            rrd_set_error("Could not find remote file %s", im->gdes[i].rrd);
                         } else {
                             return -1;
                         }
@@ -1329,6 +1363,7 @@ int perform_serialized_fetch(
                     if(im->nan_fill) {
                         im->gdes[i].generate_nan = 1;
                         strcpy(im->gdes[i].err_str, "Could not connect");
+                        rrd_set_error("Could not connect to %s",rrd_daemon);
                     } else {
                         return -1;
                     }
