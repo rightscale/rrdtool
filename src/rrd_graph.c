@@ -844,8 +844,6 @@ void generate_nan(
     {
         data[k] = DNAN;
     }
-
-    //gdes->generate_nan = 1;
 }
 
 #ifdef HAVE_LIBEV
@@ -937,7 +935,7 @@ static void cb_func_w (struct ev_loop *loop, ev_io *w_, int revents)
     int written;
    
     written = write(w->io.fd, w->write_buffer+w->bytes_written, w->length_remaining);
-    if (-1 == written) //if -1 => failed to write. Check why and close connection.
+    if (-1 == written) //if -1 => failed to write. Close connection.
     {
         w->w_gdes->generate_nan = 1;
         strcpy(w->w_gdes->err_str, "Failed to write to socket");
@@ -968,7 +966,7 @@ static void cb_func_r(struct ev_loop *loop, ev_io *w_, int revents)
 
     long bytes;
     bytes = read(w->io.fd, w->read_buffer+w->bytes_read, (4096 - w->bytes_read));
-    if(bytes == -1) //if -1 => failed to read. Check why and close connection.
+    if(bytes == -1) //if -1 => failed to read. Close connection.
     {
         w->w_gdes->generate_nan = 1;
         strcpy(w->w_gdes->err_str, "Failed to read from socket");
@@ -1021,7 +1019,7 @@ int fix_step(
         im->gdes[i].step = im->gdes[i].ft_step;
     }
     
-    // lets see if the required data source is really there
+    /* lets see if the required data source is really there */
     for (ii = 0; ii < (int) im->gdes[i].ds_cnt; ii++) {
         if (strcmp(im->gdes[i].ds_namv[ii], im->gdes[i].ds_nam) == 0) {
             im->gdes[i].ds = ii;
@@ -1091,7 +1089,7 @@ int perform_local_fetches(
 {
     int       i;
     
-    // All data should come from a remote. move on.
+    /* All data should come from a remote. Move on. */
     if(im->daemon_addr)
       return 0;
 
@@ -1159,22 +1157,23 @@ int perform_parallel_fetch(
 
     char command_buffer[4096];
     size_t command_buffer_size;
-    /*Init event I/O watchers - two for each remote 
+    /*Event I/O watchers - two for each remote 
     * fetch - one for reading and one for writing*/
     size_t watcher_memsize = 2 * remotes * sizeof(struct fetch_context);
-    struct fetch_context* watcher = (struct fetch_context *) malloc(watcher_memsize);
-    assert(watcher);
-    memset(watcher, 0, watcher_memsize);
+    struct fetch_context watcher[2 * remotes];
+    
+    memset(&watcher, 0, watcher_memsize);
     
     /*Allocate memory for socket descriptors*/
     size_t sd_memsize = remotes * sizeof(int);
-    int *sd = (int *) malloc(sd_memsize);
-    assert(sd);
-    memset(sd, 0, sd_memsize);
+    int sd[remotes];
+    memset(&sd, 0, sd_memsize);
+
     struct ev_loop *loop = ev_default_loop(0);
     
     /*Init event loop timer*/
-    struct pfetch_timer* timeout_watcher = (struct pfetch_timer *) malloc(sizeof(struct pfetch_timer));
+    struct pfetch_timer timeout_watcher;
+    memset(&timeout_watcher, 0, sizeof(struct pfetch_timer));
 
     int rem_idx = 0; // remote fetch index
     set_conn_to(im->c_timeout);
@@ -1182,6 +1181,10 @@ int perform_parallel_fetch(
 
     /* pull the data from the rrd files ... */
     for (i = 0; i < (int) im->gdes_c; i++) {
+        /* only GF_DEF elements fetch data */
+        if (im->gdes[i].gf != GF_DEF)
+            continue;
+
         int skip = 0;
         const char *rrd_daemon;
 
@@ -1190,9 +1193,6 @@ int perform_parallel_fetch(
         }else{
             rrd_daemon = im->daemon_addr;
         }
-        /* only GF_DEF elements fetch data */
-        if (im->gdes[i].gf != GF_DEF)
-            continue;
         /* do we have it already ? */
         skip = use_previously_fetched(im, i);
 
@@ -1214,7 +1214,7 @@ int perform_parallel_fetch(
                     }
                 }
 
-                // Compose the rrdtool fetch command
+                /* Compose the rrdtool fetch command */
                 rrdc_command(im->gdes[i].rrd,
                              cf_to_string (im->gdes[i].cf),
                              &im->gdes[i].start,
@@ -1246,12 +1246,28 @@ int perform_parallel_fetch(
         rem_idx++;
     } /*for(i=0; i < (int) im->gdes_c; i++)*/
 
-    timeout_watcher->gdes_c = im->gdes_c;
-    ev_timer_init (&timeout_watcher->t_out, timeout_cb, im->pf_timeout, 0.);
-    ev_timer_start (loop, &timeout_watcher->t_out);
+    timeout_watcher.gdes_c = im->gdes_c;
+    ev_timer_init (&timeout_watcher.t_out, timeout_cb, im->pf_timeout, 0.);
+    ev_timer_start (loop, &timeout_watcher.t_out);
     ev_unref(loop);
     ev_loop (loop, 0);
-     
+
+    if(event_loop_timeout) {
+        if(!im->nan_fill)
+            return -1;
+        else {
+            for(i = 0; i < (int) im->gdes_c; i++){
+                if (im->gdes[i].gf != GF_DEF)
+                    continue;
+                if((im->gdes[i].daemon != NULL || im->daemon_addr != NULL)
+                && im->gdes[i].generate_nan == 0
+                && im->gdes[i].data == NULL){
+                    im->gdes[i].generate_nan = 1;
+                    strcpy(im->gdes[i].err_str, "Parallel fetch timed out"); 
+                }
+            }
+        }
+    }
     return 0;
 }
 #endif
@@ -1269,6 +1285,10 @@ int perform_serialized_fetch(
     set_nan_fill(im->nan_fill);
     /* pull the data from the rrd files ... */
     for (i = 0; i < (int) im->gdes_c; i++) {
+        /* only GF_DEF elements fetch data */
+        if (im->gdes[i].gf != GF_DEF)
+            continue;
+
         const char *rrd_daemon;
         int skip = 0;
         if (im->gdes[i].daemon[0] != 0){
@@ -1276,9 +1296,6 @@ int perform_serialized_fetch(
         }else{
             rrd_daemon = im->daemon_addr;
         }
-        /* only GF_DEF elements fetch data */
-        if (im->gdes[i].gf != GF_DEF)
-            continue;
         /* do we have it already ? */
         skip = use_previously_fetched(im, i);
 
@@ -1322,20 +1339,13 @@ int perform_serialized_fetch(
     return 0;
 }
 
-// basic layout for refactoring of remote fetching
 int perform_remote_fetches(image_desc_t *im)
 {
-/*Mariya: Will this work like that if rrdtool was not compiled with libev??*/
 #ifdef HAVE_LIBEV
-    if(im->parallel_fetch){
-        if(perform_parallel_fetch(im) == -1)
-            return -1;
-    } else {
+    if(im->parallel_fetch)
+        return perform_parallel_fetch(im);
 #endif
-        if(perform_serialized_fetch(im) == -1)
-            return -1;
-    }
-    return 0;
+        return perform_serialized_fetch(im);
 }
 
 /* get the data required for the graphs from the
@@ -1348,24 +1358,6 @@ int data_fetch(
         return -1;
     if(perform_local_fetches(im) == -1)
         return -1;
-#ifdef HAVE_LIBEV 
-    if(event_loop_timeout) {//TODO test it!!
-        if(!im->nan_fill)
-            return -1;
-        else {
-            for(i = 0; i < (int) im->gdes_c; i++){
-                if (im->gdes[i].gf != GF_DEF)
-                    continue;
-                if((im->gdes[i].daemon != NULL || im->daemon_addr != NULL)
-                && im->gdes[i].generate_nan == 0
-                && im->gdes[i].data == NULL){
-                    im->gdes[i].generate_nan = 1;
-                    strcpy(im->gdes[i].err_str, "Parallel fetch timed out"); 
-                }
-            }
-        }
-    }
-#endif
 
     for(i=0; i<im->gdes_c; i++)
     {

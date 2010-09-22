@@ -535,7 +535,7 @@ AC_ARG_ENABLE(libev,AS_HELP_STRING([--disable-libev],[do not build in support fo
   )
 ])
 
-AM_CONDITIONAL(BUILD_LIBEVENT,[test $have_libev != no])
+AM_CONDITIONAL(BUILD_LIBEV,[test $have_libev != no])
 
 CORE_LIBS="$LIBS"
 

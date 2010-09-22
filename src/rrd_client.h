@@ -57,7 +57,7 @@
 
 #define RRDCACHED_DEFAULT_PORT "3033" //"42217"
 #define ENV_RRDCACHED_ADDRESS "RRDCACHED_ADDRESS"
-#include <ev.h>
+
 struct rrdc_response_s
 {
   int status;
