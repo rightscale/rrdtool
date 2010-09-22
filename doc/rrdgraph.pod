@@ -504,6 +504,10 @@ If a daemon is specified and accessed via the network (TCP), then the
 B<connect-timeout> option allows the user to configure a connection timeout 
 specified in seconds.
 
+Note: This timeout does not handle DNS resolution of the daemon's host-name. 
+You can use daemon's IP address in order to reduce the time overhead caused 
+by host-name resolution.
+
 [B<--nan-fill-unavailable>]
 
 If specified, rrdgraph will generate NaN data series in case standard data 
