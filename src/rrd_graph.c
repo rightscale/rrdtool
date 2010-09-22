@@ -184,7 +184,7 @@ static void timeout_cb (
     EV_P_ ev_timer *w, 
     int revents);
 
-int event_loop_timeout = 0;
+static int event_loop_timeout = 0;
 #endif
 
 /* initialize with xtr(im,0); */
